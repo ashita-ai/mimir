@@ -1,0 +1,30 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - gofmt
+    - revive
+    - gosec
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+      - name: unexported-return
+      - name: error-return
+      - name: error-naming
+  gosec:
+    excludes:
+      - G104  # errcheck is already enforced; duplicate suppression in gosec is noisy
+
+issues:
+  exclude-rules:
+    # Test files don't need gosec or errcheck strictness
+    - path: "_test\\.go"
+      linters:
+        - gosec
+        - errcheck
