@@ -124,22 +124,30 @@ type TokenBudget struct {
 
 ## `PolicyAdapter`
 
-Controls what gets posted and when.
+Controls what gets posted and when. See `adr-0005-service-architecture.md` review notes for the two-tier posting strategy.
 
 ```go
 // PolicyAdapter gates findings before they are posted to the provider.
 type PolicyAdapter interface {
     // ShouldPost returns true if the finding should be posted as a comment.
     // Implementations check confidence tier, severity, dedup state, and rate limits.
+    // Retained for simple policy implementations that don't need batch logic.
     ShouldPost(ctx context.Context, f core.Finding) bool
 
     // ShouldEscalate returns true if the finding should bypass normal suppression rules.
     // Escalated findings are always posted, regardless of confidence tier or dedup.
     ShouldEscalate(ctx context.Context, f core.Finding) bool
 
-    // MaxFindingsPerPR returns the cap on posted findings per PR.
-    // 0 means no cap.
+    // MaxFindingsPerPR returns the cap on inline findings per PR.
+    // Default: 7. Overflow findings move to summary comment.
     MaxFindingsPerPR() int
+
+    // Triage partitions findings into posting tiers.
+    // Returns: inline (posted as diff comments), summary (included in summary
+    // table only), suppress (not posted at all).
+    // Enforces the inline cap, escalation rules, and prioritizes by severity.
+    // Implementations may delegate to ShouldPost/ShouldEscalate internally.
+    Triage(ctx context.Context, findings []core.Finding) (inline, summary, suppress []core.Finding)
 }
 ```
 

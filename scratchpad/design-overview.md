@@ -66,7 +66,7 @@ type ConfidenceTier string     // "high" | "medium" | "low"
 GitHub API interaction: fetch PR metadata, diff, file list, commit list. Normalize into `core.PullRequest`. Post findings as review comments.
 
 ### `internal/index`
-Build and query the semantic repo map. M1: tree-sitter based (see ADR-0004). Returns `[]Slice` for a given `IndexRequest`.
+Build and query the semantic repo map. M1: tree-sitter based (see `adr-0004-semantic-index-treesitter.md`). Uses change-cone scoping and import-based disambiguation. Returns `[]Slice` for a given `IndexRequest`. Index is ephemeral per pipeline run — no persistent storage.
 
 ### `internal/planner`
 Given a `PullRequest` and repo map, generate `[]ReviewTask`. Each task targets one logical unit (function, type, migration). Assigns risk score and task type (security/logic/test-coverage/style).
@@ -111,26 +111,23 @@ See `scratchpad/plugin-interfaces.md` for draft Go interface definitions. The si
 
 ## Open Questions
 
-### [OPEN] Finding Fingerprinting
-How do we assign a stable fingerprint to a finding across commits?
+### [RESOLVED] Finding Fingerprinting
+**Resolution:** Dual-hash approach. See `adr-0002-database-postgresql.md` review notes for full design.
 
-Line-number-based fingerprinting breaks when code moves. Options:
-1. **Content hash of the code block** — hash the AST subtree or normalized source of the flagged region. Survives line movement, breaks on edits.
-2. **Symbol + file + description hash** — `sha256(function_name + file_path + finding_category + description_normalized)`. Survives line movement and minor edits, but may miss re-introduced identical issues.
-3. **Semantic embedding similarity** — compare finding embeddings; "same" if cosine similarity > threshold. Accurate but slow and requires embedding infrastructure.
+- **Location hash:** `sha256(repo + file_path + symbol + category)` — dedup across runs
+- **Content hash:** `sha256(AST subtree of flagged code)` — detect whether code actually changed
 
-M1 recommendation: option 2 with a tombstone table for manually dismissed fingerprints. Revisit with option 3 in M2 eval pass.
+Dedup rule: suppress if location hash matches a recent finding AND content hash is unchanged. Re-surface if location hash matches but content hash differs. No LLM output in either hash — both are deterministic.
 
-### [OPEN] Dedup Strategy
-If the same logical finding recurs across multiple review runs (e.g., a long-lived PR that keeps getting more commits), should we:
-- (a) Post a new comment each time (noisy)
-- (b) Edit the existing comment (requires tracking comment IDs, GitHub API write)
-- (c) Suppress if fingerprint is already posted and unresolved (silent — reviewer may miss it)
+### [RESOLVED] Dedup Strategy
+**Resolution:** Option (c) with content-hash gating, not TTL.
 
-Leaning toward (c) with a TTL: suppress if fingerprint was posted in the last N commits, re-surface if the code has materially changed (content hash differs from the fingerprinted version).
+Suppress if the location hash was posted for this PR AND the content hash is unchanged. Re-surface if the content hash differs (code changed but same problem pattern). No TTL — the content hash is the invalidation signal.
+
+This avoids (a)'s noise, (b)'s complexity, and the TTL's arbitrary time window. See `adr-0002-database-postgresql.md` review notes for the dual-hash design.
 
 ### [OPEN] Token Budget Validation
-See `scratchpad/slice-budgeting.md`. The 60/25/15 split is a placeholder. Needs empirical validation against real review runs before being codified as policy.
+See `slice-budgeting.md`. The 60/25/15 split is now treated as a cap, not an allocation (unused budget redistributes to diff). Approximate index shifts the default to 70/17/13. Still needs empirical validation — see `adr-0005-service-architecture.md` review notes for the feedback loop that produces labeled data.
 
 ### [OPEN] `addressed_in_next_commit` Detection
 A finding's `addressed_in_next_commit` field should flip to `true` when a subsequent commit resolves the issue. Detection strategy:
