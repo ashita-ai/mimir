@@ -70,12 +70,17 @@ The 60/25/15 split is a prior-free guess. Before M1 ships, we need:
 
 Until this exists, the split is a knob, not a decision.
 
-### [OPEN] Dynamic Budget Allocation
-Should the budget split be static (configured at startup) or dynamic (adjusted per task based on what the index actually finds)?
+### [RESOLVED] Dynamic Budget Allocation
+**Resolution:** Dynamic. The budget split is a **cap**, not an allocation.
 
-Example: if the index returns 0 callers for a private function, allocate the 25% call graph budget to additional diff context instead of wasting it.
+The slice builder fills each slot in priority order:
+1. **Diff hunk** — fill up to cap (60% default, 70% when index is approximate)
+2. **Call graph** — fill up to cap (25% default, 17% when approximate) with whatever the index returns. If the index returns fewer tokens than the cap, the unused budget rolls to diff.
+3. **Test context** — fill up to cap (15% default, 13% when approximate). Unused budget rolls to diff.
 
-This requires the slice builder to query the index before committing to a budget split. Slightly more complex but likely meaningfully better.
+This means a private function with no callers and no tests gets its entire budget for diff context — no tokens wasted on empty slots. The per-task-type adjustments (security: +10% call graph; test_coverage: +20% tests; style: diff only) are expressed as cap overrides, not allocation shifts.
+
+**Implementation:** The slice builder queries the index first (to know how much content is available per slot), then allocates. This is ~10 lines of logic — a loop with a running remainder.
 
 ### [OPEN] Multi-Turn vs. Single-Shot
 Current design: single inference call per task. The model gets one shot at the slice and returns findings.

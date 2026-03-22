@@ -29,9 +29,9 @@ CREATE TABLE findings (
     body             TEXT NOT NULL,
     suggestion       TEXT,          -- Optional: suggested fix (for inline comment)
 
-    -- Fingerprinting (see design-overview.md [OPEN])
-    fingerprint      TEXT NOT NULL, -- sha256(symbol + file_path + category + normalized_body)
-    content_hash     TEXT,          -- hash of flagged AST subtree; NULL if index unavailable
+    -- Fingerprinting (see adr-0002-database-postgresql.md review notes)
+    location_hash    TEXT NOT NULL, -- sha256(repo + file_path + symbol + category)
+    content_hash     TEXT,          -- sha256(AST subtree of flagged code); NULL if index unavailable
 
     -- Lifecycle
     posted_at        TIMESTAMPTZ,   -- NULL if not yet posted
@@ -51,8 +51,8 @@ CREATE TABLE findings (
 );
 
 CREATE INDEX findings_pull_request_id_idx ON findings (pull_request_id);
-CREATE INDEX findings_fingerprint_idx ON findings (fingerprint);
-CREATE UNIQUE INDEX findings_fingerprint_pr_idx ON findings (fingerprint, pull_request_id);
+CREATE INDEX findings_location_hash_idx ON findings (location_hash);
+CREATE UNIQUE INDEX findings_location_hash_pr_idx ON findings (location_hash, pull_request_id);
 ```
 
 ---
@@ -121,24 +121,30 @@ CREATE TABLE dismissed_fingerprints (
 
 ## Open Questions
 
-### [OPEN] Fingerprint Durability
-Current proposal: `sha256(symbol || file_path || category || normalized_body)` where `normalized_body` strips whitespace and lowercases.
+### [RESOLVED] Fingerprint Durability
+**Resolution:** Dual-hash approach. See `adr-0002-database-postgresql.md` review notes.
 
-Problem: if the function is renamed or moved to a different file, the fingerprint changes and the finding re-surfaces. Is this the right behavior? Probably yes — a rename is a material change. But file moves without renames should ideally preserve the fingerprint.
+Replace the single `fingerprint` column with:
+- `location_hash TEXT NOT NULL` — `sha256(repo + file_path + symbol + category)` — deterministic, no LLM output
+- `content_hash TEXT` — `sha256(AST subtree of flagged code)` — detects whether underlying code changed
 
-Alternative: omit `file_path` from the hash, include only `symbol + category + normalized_body`. Risk: false matches for common symbol names across files.
+Dedup rule: suppress if location hash matches a recent finding AND content hash is unchanged. Re-surface if content hash differs.
 
-**Decision needed before first migration.**
+**Schema changes:** `fingerprint` → `location_hash`. `dismissed_fingerprints` keys on `location_hash`. Unique index becomes `(location_hash, pull_request_id)`. The existing `content_hash` column is retained and connected to the dedup logic.
+
+File moves without renames: location hash changes (correct — different file is a different location). The finding re-surfaces, which is the right behavior since the reviewer hasn't seen it in this location before.
 
 ### [OPEN] `addressed_in_next_commit` Automation
 See `design-overview.md` for detection strategy options. The column exists in the schema but the update mechanism is TBD.
 
 Simplest viable: a post-review hook that re-queries findings from the previous head SHA for the same PR, checks if the fingerprint appears in the current run's findings, and flips the flag if not.
 
-### [OPEN] Partial Posting
-If a PR generates 40 findings and we post them all, the PR thread becomes unusable. Policy options:
-1. Cap at N findings per PR, prioritized by severity + confidence
-2. Batch into a single summary comment with an expandable section per finding
-3. Post only blocking findings inline, summary comment for the rest
+### [RESOLVED] Partial Posting
+**Resolution:** Two-tier posting. See `adr-0005-service-architecture.md` review notes.
 
-This is a policy question, not a schema question, but the schema should support whichever approach is chosen (`posted_at` and `github_comment_id` are per-finding for inline; a summary comment would need its own table or a NULL `start_line` convention).
+- High-confidence findings: inline comment (max 7 per PR, prioritized by severity)
+- Medium-confidence findings: summary comment table only
+- Low-confidence findings: suppressed unless escalation criteria met
+- Escalated findings (security/critical): always inline, regardless of tier
+
+The schema already supports this — `posted_at` and `github_comment_id` are per-finding for inline comments. The summary comment is a single `PostSummaryComment` call; its ID can be stored in `pull_requests.metadata` JSONB. No new table needed.
