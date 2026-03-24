@@ -1,7 +1,7 @@
 # ADR-0003: Job Queue — riverqueue/river
 
-> **Status:** Under discussion — reopened from Accepted for design review.
-> Original decision date: 2026-03-18.
+> **Status:** Accepted
+> **Date:** 2026-03-18
 
 ---
 
@@ -29,6 +29,26 @@ River uses PostgreSQL advisory locks and `SELECT ... FOR UPDATE SKIP LOCKED` for
 
 ---
 
+## Two Levels of Retry
+
+River handles **job-level** retry: if a review pipeline job crashes or times out, River re-enqueues it with exponential backoff. This is correct for infrastructure failures (DB connection lost, OOM, etc.).
+
+Inside a single pipeline run, the runtime fans out N `ReviewTask` executions in parallel. Each task makes an LLM API call that can independently fail (429 rate limit, 500 server error, timeout). These need **task-level** retry with different semantics:
+
+| Concern | Job-level (River) | Task-level (runtime) |
+|---------|-------------------|---------------------|
+| Scope | Entire pipeline run | Single ReviewTask |
+| Trigger | Unhandled panic, job timeout | LLM API error (429, 500, timeout) |
+| Retry count | Configurable per job type (default: 3) | 1 retry with exponential backoff |
+| Failure behavior | Re-enqueue entire job | Mark task as `failed`, continue siblings |
+| 400-class errors | N/A | Zero retries (bad request = bug, not transient) |
+
+**Key principle:** A single failed task must not cancel sibling tasks. If 1 of 10 LLM calls returns a 500, the other 9 findings should still be posted. The failed task is recorded in `review_tasks` with `status = 'failed'` and `error` populated. The summary comment discloses incomplete coverage.
+
+This distinction is implemented in `internal/runtime`, not in River configuration. River owns job lifecycle; runtime owns task lifecycle.
+
+---
+
 ## Consequences
 
 **Positive:**
@@ -45,25 +65,3 @@ River uses PostgreSQL advisory locks and `SELECT ... FOR UPDATE SKIP LOCKED` for
 - Temporal: Correct tool for human-in-the-loop workflows with multi-day timelines. Review pipeline completes in seconds to minutes — Temporal's operational overhead is not warranted
 - Redis + Asynq/BullMQ: Adds an additional stateful dependency. PostgreSQL is already required; adding Redis for queue only increases operational surface
 - Database polling (naive): River's `LISTEN/NOTIFY` is preferable to naive polling for latency; `SKIP LOCKED` is standard practice for PostgreSQL queues
-
----
-
-## Review Notes (2026-03-21)
-
-### Two Levels of Retry
-
-River handles **job-level** retry: if a review pipeline job crashes or times out, River re-enqueues it with exponential backoff. This is correct for infrastructure failures (DB connection lost, OOM, etc.).
-
-But inside a single pipeline run, the runtime fans out N `ReviewTask` executions in parallel. Each task makes an LLM API call that can independently fail (429 rate limit, 500 server error, timeout). These need **task-level** retry with different semantics:
-
-| Concern | Job-level (River) | Task-level (runtime) |
-|---------|-------------------|---------------------|
-| Scope | Entire pipeline run | Single ReviewTask |
-| Trigger | Unhandled panic, job timeout | LLM API error (429, 500, timeout) |
-| Retry count | Configurable per job type (default: 3) | 1 retry with exponential backoff |
-| Failure behavior | Re-enqueue entire job | Mark task as `failed`, continue siblings |
-| 400-class errors | N/A | Zero retries (bad request = bug, not transient) |
-
-**Key principle:** A single failed task must not cancel sibling tasks. If 1 of 10 LLM calls returns a 500, the other 9 findings should still be posted. The failed task is recorded in `review_tasks` with `status = 'failed'` and `error` populated. The summary comment (see ADR-0005 review notes) should note incomplete coverage.
-
-This distinction must be implemented in `internal/runtime`, not in River configuration. River owns job lifecycle; runtime owns task lifecycle.

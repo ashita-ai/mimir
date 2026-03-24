@@ -1,7 +1,7 @@
 # ADR-0001: Implementation Language — Go
 
-> **Status:** Under discussion — reopened from Accepted for design review.
-> Original decision date: 2026-03-18.
+> **Status:** Accepted
+> **Date:** 2026-03-18
 
 ---
 
@@ -33,6 +33,16 @@ All model interactions are REST calls to external provider APIs — there is no 
 
 ---
 
+## Implementation Patterns
+
+Two patterns are locked down as part of this decision:
+
+1. **Bounded `errgroup` fan-out.** Use `errgroup` with `SetLimit(n)` — not unlimited goroutine fan-out. Individual task failures must be isolated (recorded in `review_tasks.status = 'failed'`) without canceling sibling tasks. This means using a custom error-collecting pattern rather than `errgroup`'s default cancel-on-first-error behavior.
+
+2. **`context.Context` propagation is non-negotiable.** Every adapter call, every LLM inference, every tree-sitter parse must accept and respect `ctx`. This is how we enforce the P95 < 90s latency target via per-task timeouts.
+
+---
+
 ## Consequences
 
 **Positive:**
@@ -46,13 +56,3 @@ All model interactions are REST calls to external provider APIs — there is no 
 
 **Superseded alternatives:**
 - Python: More LLM tooling, but interpreter overhead, GIL constraints on CPU-bound work, and dependency management complexity outweigh benefits when all model calls are HTTP
-
----
-
-## Review Notes (2026-03-21)
-
-This decision is sound and unchanged by the design improvements proposed for the index, runtime, and policy layers. Two implementation patterns to lock down early:
-
-1. **Bounded `errgroup` in runtime fan-out.** Use `errgroup` with a semaphore (`SetLimit(n)`) — not unlimited goroutine fan-out. Individual task failures must be isolated (recorded in `review_tasks.status = 'failed'`) without canceling sibling tasks. This means using a custom error-collecting pattern rather than `errgroup`'s default cancel-on-first-error behavior.
-
-2. **`context.Context` propagation is non-negotiable.** Every adapter call, every LLM inference, every tree-sitter parse must accept and respect `ctx`. This is already stated in the plugin interface design principles but bears repeating — it's how we enforce the P95 < 90s latency target via per-task timeouts.
