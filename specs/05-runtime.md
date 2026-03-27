@@ -1,6 +1,6 @@
 # Spec 05: Runtime — Slice Building & Model Execution
 
-> **Status:** M1 Build Spec
+> **Status:** Reviewed
 > **Date:** 2026-03-27
 > **Package:** `internal/runtime`
 > **ADR:** [0005-service-architecture.md](../adr/0005-service-architecture.md) (bounded concurrency, errgroup patterns)

@@ -1,6 +1,6 @@
 # Spec 04: Task Planner
 
-> **Status:** M1 Build Spec
+> **Status:** Reviewed
 > **Date:** 2026-03-27
 > **Package:** `internal/planner`
 

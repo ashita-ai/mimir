@@ -1,6 +1,6 @@
 # Spec 11: Configuration
 
-> **Status:** M1 Build Spec
+> **Status:** Reviewed
 > **Date:** 2026-03-27
 
 ---

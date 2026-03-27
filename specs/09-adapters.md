@@ -1,6 +1,6 @@
 # Spec 09: Adapter Interfaces
 
-> **Status:** M1 Build Spec
+> **Status:** Reviewed
 > **Date:** 2026-03-27
 > **Package:** `pkg/adapter`
 > **Scratchpad:** Promotes `scratchpad/plugin-interfaces.md` to locked spec

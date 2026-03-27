@@ -1,6 +1,6 @@
 # Spec 02: Ingest — GitHub Integration
 
-> **Status:** M1 Build Spec
+> **Status:** Reviewed
 > **Date:** 2026-03-27
 > **Package:** `internal/ingest`
 > **Implements:** `pkg/adapter.ProviderAdapter`

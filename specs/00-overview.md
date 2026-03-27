@@ -1,6 +1,6 @@
 # Spec 00: Pipeline Architecture & M1 Scope
 
-> **Status:** M1 Build Spec
+> **Status:** Reviewed
 > **Date:** 2026-03-27
 
 ---
