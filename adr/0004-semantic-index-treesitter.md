@@ -1,7 +1,7 @@
 # ADR-0004: Semantic Index — Tree-sitter (M1)
 
-> **Status:** Under discussion
-> **Original decision date:** 2026-03-18. Significant design additions 2026-03-21.
+> **Status:** Accepted
+> **Original decision date:** 2026-03-18. Significant design additions 2026-03-21. Accepted 2026-03-27.
 
 ---
 
