@@ -1,0 +1,307 @@
+# Spec 12: Prompt Templates & Structured Output
+
+> **Status:** Draft
+> **Date:** 2026-03-27
+> **Package:** `internal/runtime` (prompt assembly lives here)
+
+---
+
+## Prompt Structure
+
+Every model call uses the same structure, with per-task-type variations:
+
+```
+[System prompt]              — persona, constraints, output format
+[User message]
+  ├── [Task framing]         — task type, file path, symbol name
+  ├── [Approximate warning]  — if IsApproximate(), inject calibration note
+  ├── [Diff hunk]            — labeled section
+  ├── [Call graph context]   — labeled section (may be empty)
+  ├── [Test context]         — labeled section (may be empty)
+  ├── [Truncation notice]    — if slice was truncated
+  └── [Output instructions]  — JSON schema reminder
+```
+
+---
+
+## System Prompt
+
+```
+You are a code reviewer. Your job is to find bugs, security issues, and
+quality problems in code changes. You review one function at a time.
+
+Rules:
+- Only report issues you are confident about. Do not speculate.
+- Every finding must reference specific lines in the diff.
+- If you are unsure, lower your confidence score rather than omitting the finding.
+- Do not comment on style unless explicitly asked (task_type = "style").
+- Do not suggest changes that are unrelated to the diff.
+- If the code looks correct, return an empty findings array. Not every change has issues.
+
+You must respond with valid JSON matching the schema provided at the end of the prompt.
+Do not include any text outside the JSON object.
+```
+
+---
+
+## Task Framing (Per Task Type)
+
+### Security
+
+```
+## Task
+
+Review the following code change for **security vulnerabilities**.
+
+Focus on:
+- Injection flaws (SQL, command, XSS, LDAP, etc.)
+- Authentication and authorization bypasses
+- Sensitive data exposure (secrets, PII, tokens in logs)
+- Insecure cryptographic usage
+- Missing input validation at trust boundaries
+- Race conditions that affect security state
+
+File: {file_path}
+Function: {symbol}
+Language: {language}
+```
+
+### Logic
+
+```
+## Task
+
+Review the following code change for **logic errors and correctness issues**.
+
+Focus on:
+- Nil/null pointer dereferences
+- Off-by-one errors and boundary conditions
+- Error handling gaps (unchecked errors, swallowed exceptions)
+- Concurrency issues (races, deadlocks, missing synchronization)
+- Contract violations (preconditions, postconditions, invariants)
+- Resource leaks (unclosed handles, connections, goroutines)
+
+File: {file_path}
+Function: {symbol}
+Language: {language}
+```
+
+### Test Coverage
+
+```
+## Task
+
+Review the following code change for **test coverage gaps**.
+
+Focus on:
+- Does a test exist for this function? If not, flag it.
+- Do existing tests cover the changed behavior?
+- Are edge cases tested (empty input, nil, max values, error paths)?
+- Are tests testing implementation details instead of behavior?
+
+File: {file_path}
+Function: {symbol}
+Language: {language}
+```
+
+### Style
+
+```
+## Task
+
+Review the following code change for **style and readability issues**.
+
+Focus on:
+- Naming: do names communicate intent?
+- Complexity: can the logic be simplified?
+- Duplication: is there copy-paste that should be extracted?
+- Documentation: are public APIs documented? Are comments misleading?
+
+Only flag issues that materially affect readability. Do not flag personal preferences.
+
+File: {file_path}
+Function: {symbol}
+Language: {language}
+```
+
+---
+
+## Approximate Context Warning
+
+Injected when `IsApproximate()` is `true` and the slice includes call graph or test context:
+
+```
+**Important:** The caller/callee context below was assembled using heuristic
+import analysis, not type-resolved references. Some caller relationships may
+be false matches (e.g., a function with the same name in a different package).
+Verify relationships before citing them in your findings. If a finding depends
+on a caller relationship, note this uncertainty in the finding body and reduce
+your confidence score accordingly.
+```
+
+---
+
+## Slice Sections
+
+### Diff Hunk
+
+```
+## Changed Code
+
+```{language}
+{diff_hunk}
+```
+
+Lines prefixed with `+` are additions. Lines prefixed with `-` are deletions.
+Lines without a prefix are unchanged context.
+```
+
+### Call Graph Context
+
+```
+## Callers and Callees
+
+The following functions call or are called by the changed function:
+
+```{language}
+{call_graph_content}
+```
+```
+
+If empty (no callers/callees found), this section is omitted entirely.
+
+### Test Context
+
+```
+## Related Tests
+
+The following test functions exercise the changed function:
+
+```{language}
+{test_context}
+```
+```
+
+If empty (no tests found), this section is omitted, and the model should note the absence of tests in its findings if relevant (for test_coverage tasks, this is itself a finding).
+
+---
+
+## Truncation Notice
+
+Appended when `Slice.Truncated` is `true`:
+
+```
+**Note:** The context above was truncated to fit within the token budget.
+Some code may be missing. If your analysis depends on code that appears to
+be cut off, note this limitation and reduce your confidence score.
+```
+
+---
+
+## Output Schema
+
+```
+## Response Format
+
+Respond with a single JSON object. No markdown, no explanation, no preamble.
+
+Schema:
+{
+  "findings": [
+    {
+      "title": "Short description of the issue (< 100 chars)",
+      "body": "Detailed explanation. Reference specific line numbers from the diff. Explain why this is a problem and what could go wrong.",
+      "suggestion": "Optional: a concrete code fix. If you include this, it must be syntactically valid code that can replace the flagged lines.",
+      "category": "security | logic | test_coverage | style | performance",
+      "severity": "critical | high | medium | low | info",
+      "confidence_tier": "high | medium | low",
+      "confidence_score": 0.85,
+      "start_line": 42,
+      "end_line": 45
+    }
+  ]
+}
+
+Rules:
+- "findings" must be an array (empty array if no issues found)
+- "confidence_tier" must match "confidence_score":
+  - high: 0.80–1.00
+  - medium: 0.50–0.79
+  - low: 0.00–0.49
+- "start_line" and "end_line" refer to line numbers in the new version of the file (lines marked with + in the diff, or unchanged context lines)
+- "suggestion" is optional. Omit it if you don't have a concrete fix.
+- "category" should match the task type unless you discover a cross-cutting issue (e.g., a security issue found during a logic review)
+```
+
+---
+
+## Prompt Storage
+
+Prompts are stored as Go string constants in `internal/runtime/prompts.go`. Not embedded files — the overhead of file I/O is not worth it for a handful of templates, and constants are compile-time checked.
+
+```go
+package runtime
+
+const systemPrompt = `You are a code reviewer...`
+
+const taskFramingSecurity = `## Task\n\nReview the following code change for **security vulnerabilities**...`
+// etc.
+```
+
+### Prompt Versioning
+
+For eval reproducibility, each prompt template set has a version string:
+
+```go
+const promptVersion = "v1"
+```
+
+This version is stored in `findings.metadata` (under `"prompt_version"`) so that eval can group findings by prompt generation. When prompts change, bump the version.
+
+---
+
+## Response Parsing
+
+```go
+type modelResponse struct {
+    Findings []rawFinding `json:"findings"`
+}
+
+type rawFinding struct {
+    Title           string  `json:"title"`
+    Body            string  `json:"body"`
+    Suggestion      string  `json:"suggestion,omitempty"`
+    Category        string  `json:"category"`
+    Severity        string  `json:"severity"`
+    ConfidenceTier  string  `json:"confidence_tier"`
+    ConfidenceScore float64 `json:"confidence_score"`
+    StartLine       *int    `json:"start_line"`
+    EndLine         *int    `json:"end_line"`
+}
+```
+
+Parsing flow:
+1. Extract JSON from the model response text (handle models that wrap JSON in markdown code blocks)
+2. Unmarshal into `modelResponse`
+3. Validate each finding (tier/score consistency, valid enums, line ranges within diff)
+4. Map valid findings to `core.Finding`, populating `ReviewTaskID`, `PullRequestID`, `LocationHash`, `ContentHash`, `ModelID`, token counts
+5. Log and skip invalid findings (do not crash the task)
+
+### JSON Extraction
+
+Models sometimes wrap JSON in ```json ... ``` blocks. Handle this:
+
+```go
+func extractJSON(raw string) string {
+    // Try direct parse first
+    if json.Valid([]byte(raw)) {
+        return raw
+    }
+    // Try extracting from markdown code block
+    re := regexp.MustCompile("(?s)```(?:json)?\\s*\\n?(.*?)\\n?```")
+    if m := re.FindStringSubmatch(raw); len(m) > 1 {
+        return m[1]
+    }
+    return raw // let json.Unmarshal report the error
+}
+```

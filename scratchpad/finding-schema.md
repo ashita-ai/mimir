@@ -140,7 +140,7 @@ See `design-overview.md` for detection strategy options. The column exists in th
 Simplest viable: a post-review hook that re-queries findings from the previous head SHA for the same PR, checks if the fingerprint appears in the current run's findings, and flips the flag if not.
 
 ### [RESOLVED] Partial Posting
-**Resolution:** Two-tier posting. See `adr-0005-service-architecture.md` review notes.
+**Resolution:** Two-tier posting. See `adr/0005-service-architecture.md` review notes.
 
 - High-confidence findings: inline comment (max 7 per PR, prioritized by severity)
 - Medium-confidence findings: summary comment table only

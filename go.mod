@@ -1,6 +1,6 @@
 module github.com/ashita-ai/mimir
 
-go 1.25.6
+go 1.23
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
