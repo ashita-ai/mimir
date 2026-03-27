@@ -1,6 +1,6 @@
 # Spec 08: Eval — Metrics & Feedback
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `internal/eval`
 

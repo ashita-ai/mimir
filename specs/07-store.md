@@ -1,6 +1,6 @@
 # Spec 07: Store — Database Schema & Persistence
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `internal/store`
 > **Implements:** `pkg/adapter.StoreAdapter`

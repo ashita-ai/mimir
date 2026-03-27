@@ -1,6 +1,6 @@
 # Spec 03: Semantic Index — Tree-sitter
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `internal/index`
 > **Implements:** `pkg/adapter.IndexAdapter`

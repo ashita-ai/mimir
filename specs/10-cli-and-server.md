@@ -1,6 +1,6 @@
 # Spec 10: CLI & Server
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `cmd/mimir`
 > **ADR:** [0005-service-architecture.md](../adr/0005-service-architecture.md)

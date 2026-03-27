@@ -1,6 +1,6 @@
 # Spec 06: Policy — Filtering, Triage & Posting
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `internal/policy`
 > **Implements:** `pkg/adapter.PolicyAdapter`

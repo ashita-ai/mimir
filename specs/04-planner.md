@@ -1,6 +1,6 @@
 # Spec 04: Task Planner
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `internal/planner`
 

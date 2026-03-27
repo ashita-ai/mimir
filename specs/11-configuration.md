@@ -1,6 +1,6 @@
 # Spec 11: Configuration
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 
 ---

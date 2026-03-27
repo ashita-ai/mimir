@@ -69,10 +69,9 @@ Every spec in `specs/` carries a status in its frontmatter:
 | Status | Meaning |
 |--------|---------|
 | `Draft` | Under active design. May change substantially. |
-| `Reviewed` | Design-reviewed for correctness, durability, and audit trail. Ready for implementation. |
-| `Implementing` | Implementation in progress. Spec is locked unless a bug is found. |
+| `Reviewed` | Design-reviewed and ready for implementation. |
+| `Approved` | Approved for implementation. Spec is locked unless a bug is found. |
 | `Implemented` | Code matches spec. Spec becomes documentation. |
-| `Superseded` | Replaced by a newer spec. Link to successor in frontmatter. |
 
 When changing a spec's status, update the `> **Status:**` line in the file header.
 

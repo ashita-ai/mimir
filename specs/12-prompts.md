@@ -1,6 +1,6 @@
 # Spec 12: Prompt Templates & Structured Output
 
-> **Status:** Reviewed
+> **Status:** Draft
 > **Date:** 2026-03-27
 > **Package:** `internal/runtime` (prompt assembly lives here)
 
