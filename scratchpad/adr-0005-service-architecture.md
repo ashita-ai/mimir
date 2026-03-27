@@ -1,7 +1,7 @@
 # ADR-0005: Service Architecture — Single Binary, Dual Runtime Mode
 
-> **Status:** Under discussion — reopened from Accepted for design review.
-> Original decision date: 2026-03-18. Significant design additions 2026-03-21.
+> **Status:** Under discussion
+> **Original decision date:** 2026-03-18. Significant design additions 2026-03-21.
 
 ---
 

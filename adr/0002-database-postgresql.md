@@ -1,7 +1,7 @@
 # ADR-0002: Database — PostgreSQL Only
 
-> **Status:** Under discussion — reopened from Accepted for design review.
-> Original decision date: 2026-03-18.
+> **Status:** Accepted
+> **Date:** 2026-03-18
 
 ---
 
@@ -31,6 +31,31 @@ CLI mode connects to a local PostgreSQL instance (started via Docker Compose). T
 
 ---
 
+## Dual-Hash Fingerprinting
+
+The finding schema uses fingerprinting to deduplicate findings across review runs. A single-hash approach (`sha256(symbol + file_path + category + normalized_body)`) was considered and rejected — it is both too brittle (breaks on file moves) and too unstable (LLM output is nondeterministic, so `normalized_body` changes across runs even for the same finding).
+
+**Two-hash approach:**
+
+| Hash | Formula | Purpose |
+|------|---------|---------|
+| **Location hash** | `sha256(repo + file_path + symbol + category)` | Dedup across runs: "have we flagged this spot for this issue type?" |
+| **Content hash** | `sha256(AST subtree of the flagged code region)` | Detect whether the code actually changed since last flagged |
+
+**Dedup rule:** Suppress a finding if its location hash matches a recent finding AND the content hash is unchanged. Re-surface if the location hash matches but the content hash differs — the code changed, but the same problem may persist.
+
+This keeps all fingerprinting deterministic (no LLM output in the hash), survives line number changes within a file, and correctly re-surfaces findings when code is modified.
+
+**Schema impact:** The `findings` table has separate `location_hash` and `content_hash` columns. The `dismissed_fingerprints` table keys on `location_hash`. A unique index on `(location_hash, pull_request_id)` prevents duplicate findings within a single PR.
+
+---
+
+## No Graph DB, No Vector DB
+
+PostgreSQL handles everything Mimir persists. The semantic index (ADR-0004) is ephemeral per-run data held in memory. There is no query pattern that requires graph traversal or vector similarity search in M1 or M2. If semantic dedup via embeddings is explored in M3+, `pgvector` (a PostgreSQL extension) would be evaluated before any standalone vector DB.
+
+---
+
 ## Consequences
 
 **Positive:**
@@ -45,28 +70,3 @@ CLI mode connects to a local PostgreSQL instance (started via Docker Compose). T
 
 **Superseded alternatives:**
 - SQLite + PostgreSQL dual mode: Considered and rejected. Dual migration dialects, no JSONB, no array types, and `river` requires PostgreSQL anyway. The portability gain was not worth the complexity cost.
-
----
-
-## Review Notes (2026-03-21)
-
-### Dual-Hash Fingerprinting
-
-The finding schema uses fingerprinting to deduplicate findings across review runs. The original design proposed a single hash: `sha256(symbol + file_path + category + normalized_body)`. This is both too brittle (breaks on file moves) and too unstable (LLM output is nondeterministic, so `normalized_body` changes across runs even for the same finding).
-
-**Proposed: two-hash approach.**
-
-| Hash | Formula | Purpose |
-|------|---------|---------|
-| **Location hash** | `sha256(repo + file_path + symbol + category)` | Dedup across runs: "have we flagged this spot for this issue type?" |
-| **Content hash** | `sha256(AST subtree of the flagged code region)` | Detect whether the code actually changed since last flagged |
-
-**Dedup rule:** Suppress a finding if its location hash matches a recent finding AND the content hash is unchanged. Re-surface if the location hash matches but the content hash differs — the code changed, but the same problem may persist.
-
-This keeps all fingerprinting deterministic (no LLM output in the hash), survives line number changes within a file, and correctly re-surfaces findings when code is modified. The `content_hash` column already exists in the finding schema draft — this change connects it to the dedup logic.
-
-**Schema impact:** Replace the single `fingerprint` column with `location_hash` and keep `content_hash`. The `dismissed_fingerprints` table keys on `location_hash`. The unique index becomes `(location_hash, pull_request_id)`.
-
-### No Graph DB, No Vector DB
-
-PostgreSQL handles everything Mimir persists. The semantic index (ADR-0004) is ephemeral per-run data held in memory. There is no query pattern that requires graph traversal or vector similarity search in M1 or M2. If semantic dedup via embeddings is explored in M3+, `pgvector` (a PostgreSQL extension) would be evaluated before any standalone vector DB.
