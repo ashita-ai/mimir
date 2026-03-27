@@ -69,13 +69,24 @@ func runServe(cfg Config) error {
         r.Use(middleware.Timeout(30 * time.Second))
 
         r.Get("/healthz", healthHandler(pool, riverClient))
-        r.Post("/webhooks/github", webhookHandler(cfg.GitHub.WebhookSecret, store, riverClient, pool))
+        r.Post("/webhooks/github", webhookHandler(cfg.GitHub.WebhookSecret, store, riverClient))
 
         srv := &http.Server{Addr: cfg.ListenAddr, Handler: r}
         go srv.ListenAndServe()
     }
 
-    // 9. Register periodic jobs
+    // 9. Check synchronous_commit setting
+    var syncCommit string
+    pool.QueryRow(ctx, "SHOW synchronous_commit").Scan(&syncCommit)
+    if syncCommit != "on" {
+        log.Warn("synchronous_commit is not 'on' — data loss is possible on crash",
+            zap.String("synchronous_commit", syncCommit))
+    }
+
+    // 10. Reconcile stale pipeline runs from prior crashes
+    store.ReconcileStalePipelineRuns(ctx, 2*cfg.JobTimeout) // default: 10 min
+
+    // 11. Register periodic jobs
     riverClient.PeriodicJobs().Add(
         river.NewPeriodicJob(
             river.PeriodicInterval(15*time.Minute),
@@ -86,7 +97,27 @@ func runServe(cfg Config) error {
         ),
     )
 
-    // 10. Wait for shutdown signal
+    riverClient.PeriodicJobs().Add(
+        river.NewPeriodicJob(
+            river.PeriodicInterval(5*time.Minute),
+            func() (river.JobArgs, *river.InsertOpts) {
+                return &PostingRetryJob{}, nil
+            },
+            nil,
+        ),
+    )
+
+    riverClient.PeriodicJobs().Add(
+        river.NewPeriodicJob(
+            river.PeriodicInterval(10*time.Minute),
+            func() (river.JobArgs, *river.InsertOpts) {
+                return &ReconcileStaleRunsJob{Timeout: 2 * cfg.JobTimeout}, nil
+            },
+            nil,
+        ),
+    )
+
+    // 12. Wait for shutdown signal
     <-ctx.Done()
     // Graceful shutdown: stop HTTP → drain River → close pool
 }
@@ -146,7 +177,9 @@ func runReview(cfg Config) error {
     models := buildModelRegistry(cfg.Models)
     policy := policy.NewDefaultPolicy(store, cfg.Policy)
 
-    // 3. Run pipeline synchronously (no River)
+    // 3. Run pipeline synchronously (no River).
+    // pipeline.Run internally calls checkoutRepo to create a shallow clone,
+    // runs the full pipeline, and cleans up the checkout directory on return.
     pipeline := pipeline.New(store, provider, index, models, policy, cfg.Runtime)
     result, err := pipeline.Run(ctx, cfg.RepoFullName, cfg.PRNumber)
 
@@ -219,10 +252,14 @@ Returns 503 if either check fails.
 ## Webhook Handler Detail
 
 ```go
-func webhookHandler(secret string, store adapter.StoreAdapter, riverClient *river.Client, pool *pgxpool.Pool) http.HandlerFunc {
+func webhookHandler(secret string, store adapter.StoreAdapter, riverClient *river.Client) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         // 1. Read body
         body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10MB limit
+        if err != nil {
+            http.Error(w, "failed to read body", http.StatusBadRequest)
+            return
+        }
 
         // 2. Verify signature
         sig := r.Header.Get("X-Hub-Signature-256")
@@ -240,7 +277,10 @@ func webhookHandler(secret string, store adapter.StoreAdapter, riverClient *rive
 
         // 4. Parse payload
         var event github.PullRequestEvent
-        json.Unmarshal(body, &event)
+        if err := json.Unmarshal(body, &event); err != nil {
+            http.Error(w, "invalid payload", http.StatusBadRequest)
+            return
+        }
 
         // 5. Filter action
         action := event.GetAction()
@@ -249,16 +289,26 @@ func webhookHandler(secret string, store adapter.StoreAdapter, riverClient *rive
             return
         }
 
-        // 6. Transactional: upsert PR + enqueue job
-        store.WithTx(ctx, func(tx pgx.Tx) error {
+        // 6. Transactional: upsert PR + enqueue job.
+        // WithTx provides a tx-bound store (txStore) so that the PR upsert
+        // and the River job insert execute on the SAME transaction.
+        // If either fails, both are rolled back — no orphaned PRs, no lost jobs.
+        ctx := r.Context()
+        if err := store.WithTx(ctx, func(txStore adapter.StoreAdapter, tx pgx.Tx) error {
             pr := mapGitHubEventToPR(event)
-            store.UpsertPullRequest(ctx, pr)
+            if err := txStore.UpsertPullRequest(ctx, pr); err != nil {
+                return fmt.Errorf("upsert PR: %w", err)
+            }
 
             _, err := riverClient.InsertTx(ctx, tx, &ReviewPipelineJob{
                 PullRequestID: pr.ID,
             }, nil)
             return err
-        })
+        }); err != nil {
+            log.Error("webhook processing failed", zap.Error(err))
+            http.Error(w, "internal error", http.StatusInternalServerError)
+            return
+        }
 
         w.WriteHeader(http.StatusAccepted)
     }
@@ -290,6 +340,18 @@ River configuration:
 - Max attempts: 3 (default)
 - Backoff: exponential (River default: 1s, 2s, 4s, ...)
 - Job timeout: 5 minutes (pipeline-level; individual tasks have their own 60s timeout)
+
+---
+
+## Periodic Jobs
+
+| Job | Interval | Purpose |
+|-----|----------|---------|
+| `ReactionPollJob` | 15 min | Poll GitHub reactions on posted findings for eval signal |
+| `PostingRetryJob` | 5 min | Retry posting for findings persisted but not posted (GitHub API failure recovery) |
+| `ReconcileStaleRunsJob` | 10 min | Mark orphaned `running` pipeline_runs as `failed` after 2× job timeout |
+
+All periodic jobs are registered at startup. They are no-ops when there is no work to do (no unposted findings, no stale runs, no recent findings to poll).
 
 ---
 

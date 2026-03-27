@@ -185,30 +185,55 @@ type StoreAdapter interface {
     // Pull requests
     UpsertPullRequest(ctx context.Context, pr *core.PullRequest) error
     GetPullRequest(ctx context.Context, id uuid.UUID) (*core.PullRequest, error)
+    SoftDeletePullRequest(ctx context.Context, id uuid.UUID) error
+
+    // Pipeline runs
+    CreatePipelineRun(ctx context.Context, run *core.PipelineRun) error
+    CompletePipelineRun(ctx context.Context, id uuid.UUID, status core.PipelineStatus, stats PipelineRunStats) error
+    GetPipelineRun(ctx context.Context, id uuid.UUID) (*core.PipelineRun, error)
+    ListPipelineRunsForPR(ctx context.Context, prID uuid.UUID) ([]core.PipelineRun, error)
 
     // Review tasks
     CreateReviewTask(ctx context.Context, task *core.ReviewTask) error
     UpdateReviewTaskStatus(ctx context.Context, id uuid.UUID, status string, errMsg *string) error
     ListReviewTasksForPR(ctx context.Context, prID uuid.UUID) ([]core.ReviewTask, error)
-    CountTaskStats(ctx context.Context, prID uuid.UUID) (total, completed, failed int, err error)
+    ListReviewTasksForRun(ctx context.Context, runID uuid.UUID) ([]core.ReviewTask, error)
+    CountTaskStats(ctx context.Context, runID uuid.UUID) (total, completed, failed int, err error)
 
     // Findings
     CreateFinding(ctx context.Context, f *core.Finding) error
     ListFindingsForPR(ctx context.Context, prID uuid.UUID) ([]core.Finding, error)
+    ListFindingsForRun(ctx context.Context, runID uuid.UUID) ([]core.Finding, error)
     MarkFindingPosted(ctx context.Context, id uuid.UUID, commentID int64) error
     MarkFindingAddressed(ctx context.Context, id uuid.UUID, status core.AddressedStatus) error
     FindPriorFinding(ctx context.Context, prID uuid.UUID, locationHash string) (*core.Finding, error)
     ListUnaddressedFindings(ctx context.Context, prID uuid.UUID) ([]core.Finding, error)
+    ListUnpostedFindings(ctx context.Context) ([]core.Finding, error)
+
+    // Pipeline run lifecycle
+    ReconcileStalePipelineRuns(ctx context.Context, staleThreshold time.Duration) error
 
     // Dismissals
     IsFingerprintDismissed(ctx context.Context, fingerprint, repoFullName string) (bool, error)
     DismissFingerprint(ctx context.Context, fingerprint, repoFullName, dismissedBy, reason string) error
 
-    // Events
-    CreateFindingEvent(ctx context.Context, findingID uuid.UUID, eventType, actor string) error
+    // Events (append-only audit log)
+    CreateFindingEvent(ctx context.Context, findingID uuid.UUID, eventType, actor string, oldValue, newValue *string) error
+    ListEventsForFinding(ctx context.Context, findingID uuid.UUID) ([]core.FindingEvent, error)
 
-    // Transactions
-    WithTx(ctx context.Context, fn func(tx pgx.Tx) error) error
+    // Transactions — callback receives a tx-bound StoreAdapter + raw pgx.Tx for River.
+    // All store operations within fn execute on the same transaction.
+    WithTx(ctx context.Context, fn func(txStore StoreAdapter, tx pgx.Tx) error) error
+}
+
+// PipelineRunStats is passed to CompletePipelineRun to record final counts.
+type PipelineRunStats struct {
+    TasksTotal      int
+    TasksCompleted  int
+    TasksFailed     int
+    FindingsTotal   int
+    FindingsPosted  int // inline + summary findings actually posted to GitHub
+    FindingsSuppressed int // suppressed (duplicate, low_confidence, dismissed)
 }
 ```
 
@@ -216,8 +241,12 @@ type StoreAdapter interface {
 - Added `CountTaskStats` for summary comment generation
 - Added `FindPriorFinding` and `ListUnaddressedFindings` for dedup and addressed-in-next-commit
 - Added `DismissFingerprint` and `CreateFindingEvent`
-- Added `WithTx` for transactional operations
+- Added `WithTx` for transactional operations — **provides a tx-bound StoreAdapter**, not a raw pgx.Tx, to prevent the caller from accidentally using the pool-backed store within a transaction
 - `MarkFindingAddressed` takes `AddressedStatus` instead of being boolean
+- Added `PipelineRun` CRUD methods for audit trail
+- Added `SoftDeletePullRequest` — no hard deletes; all FKs use `ON DELETE RESTRICT`
+- Added `ListEventsForFinding` for audit log queries
+- `CreateFindingEvent` takes `oldValue`/`newValue` for change tracking
 
 **M1 implementation:** `internal/store.PostgresStore`
 

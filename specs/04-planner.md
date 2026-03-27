@@ -54,7 +54,11 @@ Risk score is a float64 in [0.0, 1.0]. It determines whether a symbol is reviewe
 ### Scoring Algorithm
 
 ```go
-func computeRiskScore(sym core.Symbol, filePath string, hasTests bool, diffSize int) core.RiskScore {
+// computeRiskScore determines review priority for a changed symbol.
+// changedLineCount is the number of diff lines that overlap the symbol's range,
+// NOT the symbol's total size. This is computed by intersecting the diff hunks
+// with the symbol's [StartLine, EndLine] range (see index.symbolOverlapsDiff).
+func computeRiskScore(sym core.Symbol, filePath string, hasTests bool, changedLineCount int) core.RiskScore {
     score := 0.0
 
     // File path signals
@@ -73,11 +77,11 @@ func computeRiskScore(sym core.Symbol, filePath string, hasTests bool, diffSize 
         score += 0.15 // untested code = higher risk
     }
 
-    // Change magnitude
-    changedLines := sym.EndLine - sym.StartLine
-    if changedLines > 50 {
+    // Change magnitude — based on actual changed lines, not total symbol size.
+    // A 200-line function with a 1-line fix should score low on this axis.
+    if changedLineCount > 50 {
         score += 0.2
-    } else if changedLines > 20 {
+    } else if changedLineCount > 20 {
         score += 0.1
     }
 
@@ -200,7 +204,7 @@ The resolved `ModelID` is stored on the `ReviewTask` so the runtime knows which 
 On a `synchronize` event (new push to existing PR), the planner checks for prior tasks:
 
 ```sql
-SELECT location_hash, content_hash
+SELECT f.location_hash, f.content_hash
 FROM review_tasks rt
 JOIN findings f ON f.review_task_id = rt.id
 WHERE rt.pull_request_id = $1

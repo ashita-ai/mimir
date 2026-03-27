@@ -157,7 +157,18 @@ During M1 pipeline runs, capture enough data to replay reviews offline later. St
 }
 ```
 
-The full prompt text is NOT stored (too large). Instead, store a `prompt_hash` so that replays with the same prompt template version produce the same hash, confirming reproducibility. The slice content can be reconstructed from the git SHAs + symbol table.
+The full prompt text is NOT stored (too large). Instead, store a `prompt_hash` so that replays with the same prompt template version produce the same hash, confirming reproducibility. The slice content can be reconstructed from the git SHAs + symbol table. The `review_tasks.diff_hunk` column preserves the exact diff used for each task, surviving force-pushes and rebases.
+
+### Pipeline Run Context
+
+Each pipeline execution creates a `pipeline_runs` row recording:
+- `prompt_version` — which prompt templates were used
+- `config_hash` — sha256 of the runtime config at execution time
+- `head_sha` — the exact commit reviewed
+- Final task/finding counts (including posted vs. suppressed breakdown)
+- `metadata` JSONB — the **full model routing table** (not just the hash), token budget configuration, and any runtime overrides active at execution time. The hash enables quick equality checks across runs; the full snapshot in metadata ensures no pipeline run's configuration is irrecoverable.
+
+This enables M2 replay: group findings by `(prompt_version, config_hash)` to isolate the effect of prompt changes vs. config changes vs. code changes. The full routing table in `metadata` means replay can reconstruct exactly which model handled each task type, even if the routing config has since changed.
 
 ---
 

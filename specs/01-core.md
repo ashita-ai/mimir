@@ -50,11 +50,13 @@ const (
 type ReviewTask struct {
     ID              uuid.UUID
     PullRequestID   uuid.UUID
+    PipelineRunID   uuid.UUID
     TaskType        TaskType
     FilePath        string
     Symbol          string          // function/type name; empty for file-level tasks
     RiskScore       RiskScore
     ModelID         string          // resolved model for this task (e.g. "claude-opus-4-6")
+    DiffHunk        *string         // captured diff hunk used for this task; survives force-push/rebase
     Status          TaskStatus
     Error           *string         // populated on failure
     StartedAt       *time.Time
@@ -96,8 +98,10 @@ type Finding struct {
     ID              uuid.UUID
     ReviewTaskID    uuid.UUID
     PullRequestID   uuid.UUID
+    PipelineRunID   uuid.UUID
 
     // Location
+    RepoFullName    string          // denormalized from PullRequest for direct dismissed_fingerprints lookups
     FilePath        string
     StartLine       *int            // nil for file-level findings
     EndLine         *int
@@ -117,11 +121,13 @@ type Finding struct {
     // Fingerprinting
     LocationHash    string          // sha256(repo + file_path + symbol + category)
     ContentHash     *string         // sha256(AST subtree); nil if index unavailable
+    HeadSHA         string          // commit SHA this finding was produced against
 
     // Lifecycle
     PostedAt        *time.Time
     GitHubCommentID *int64
     AddressedStatus AddressedStatus // unaddressed | likely_addressed | confirmed
+    SuppressionReason *string       // nil if not suppressed; "duplicate", "low_confidence", "dismissed_fingerprint"
     DismissedAt     *time.Time
     DismissedBy     *string         // GitHub username
 
@@ -230,6 +236,73 @@ type TokenBudget struct {
     CallGraph int // max tokens for caller/callee context
     Tests     int // max tokens for test context
     Total     int // hard cap across all sections
+}
+```
+
+### PipelineRun
+
+```go
+// PipelineRun records a single execution of the review pipeline for a PR.
+// This is the primary audit record: "we ran the pipeline at time T with config X."
+type PipelineRun struct {
+    ID              uuid.UUID
+    PullRequestID   uuid.UUID
+    HeadSHA         string
+    PromptVersion   string          // e.g. "v1"; groups findings by prompt generation
+    ConfigHash      string          // sha256 of serialized runtime config at execution time
+    Status          PipelineStatus
+    TasksTotal         *int
+    TasksCompleted     *int
+    TasksFailed        *int
+    FindingsTotal      *int
+    FindingsPosted     *int
+    FindingsSuppressed *int
+    StartedAt       time.Time
+    CompletedAt     *time.Time
+    Metadata        json.RawMessage // model routing snapshot, budget config, etc.
+}
+
+type PipelineStatus string
+
+const (
+    PipelineStatusRunning   PipelineStatus = "running"
+    PipelineStatusCompleted PipelineStatus = "completed"
+    PipelineStatusFailed    PipelineStatus = "failed"
+)
+```
+
+### FindingEvent
+
+```go
+// FindingEvent is a row in the append-only audit log for finding lifecycle transitions.
+type FindingEvent struct {
+    ID        uuid.UUID
+    FindingID uuid.UUID
+    EventType string          // "created", "posted", "suppressed", "addressed", "dismissed",
+                              // "resolved", "confidence_adjusted", "tier_changed",
+                              // "thumbs_up", "thumbs_down"
+    Actor     string          // GitHub username or "mimir" for system events
+    OldValue  *string         // previous state (e.g. old confidence score, old tier)
+    NewValue  *string         // new state
+    Metadata  json.RawMessage
+    CreatedAt time.Time
+}
+```
+
+### APIError
+
+```go
+// APIError represents a structured error from an external API (LLM provider, GitHub).
+// Used by isRetryable to classify errors for retry decisions.
+type APIError struct {
+    StatusCode int
+    Message    string
+    Provider   string // "anthropic", "github", etc.
+    RetryAfter *time.Duration // from Retry-After header, if present
+}
+
+func (e *APIError) Error() string {
+    return fmt.Sprintf("%s API error %d: %s", e.Provider, e.StatusCode, e.Message)
 }
 ```
 

@@ -24,7 +24,7 @@
 When `IndexAdapter.IsApproximate()` is `true`, apply a 0.85× multiplier to any finding whose slice included call-graph or test context:
 
 ```go
-func applyApproximatePenalty(findings []core.Finding, approximate bool) []core.Finding {
+func applyApproximatePenalty(findings []core.Finding, approximate bool, eventLog func(core.Finding, string, string, string)) []core.Finding {
     if !approximate {
         return findings
     }
@@ -33,9 +33,20 @@ func applyApproximatePenalty(findings []core.Finding, approximate bool) []core.F
         // Only penalize findings that used semantic context
         // (diff-only findings are not affected)
         if f.Metadata != nil && hasSemanticContext(f.Metadata) {
-            f.ConfidenceScore *= 0.85
-            // Downgrade tier if score dropped below threshold
+            oldScore := f.ConfidenceScore
+            oldTier := f.ConfidenceTier
+            f.ConfidenceScore = roundConfidence(f.ConfidenceScore * 0.85)
             f.ConfidenceTier = tierFromScore(f.ConfidenceScore)
+
+            // Record the adjustment in the audit log
+            eventLog(*f, "confidence_adjusted",
+                fmt.Sprintf("%.4f", oldScore),
+                fmt.Sprintf("%.4f", f.ConfidenceScore))
+            if oldTier != f.ConfidenceTier {
+                eventLog(*f, "tier_changed",
+                    string(oldTier),
+                    string(f.ConfidenceTier))
+            }
         }
     }
     return findings
@@ -50,6 +61,13 @@ func tierFromScore(score float64) core.ConfidenceTier {
     default:
         return core.ConfidenceLow
     }
+}
+
+// roundConfidence rounds to 4 decimal places after any arithmetic operation.
+// This prevents IEEE 754 float artifacts (e.g., 0.94 * 0.85 = 0.7999...)
+// from causing spurious tier transitions at boundaries.
+func roundConfidence(score float64) float64 {
+    return math.Round(score*10000) / 10000
 }
 ```
 
@@ -117,39 +135,49 @@ func (p *DefaultPolicy) Triage(ctx context.Context, findings []core.Finding) (in
     var summaryFindings []core.Finding
     var suppressedFindings []core.Finding
 
-    for _, f := range findings {
+    for i := range findings {
+        f := &findings[i]
+
         // Step 1: Check permanent dismissal
         if dismissed, _ := p.store.IsFingerprintDismissed(ctx, f.LocationHash, f.RepoFullName); dismissed {
-            suppressedFindings = append(suppressedFindings, f)
+            reason := "dismissed_fingerprint"
+            f.SuppressionReason = &reason
+            suppressedFindings = append(suppressedFindings, *f)
             continue
         }
 
         // Step 2: Check dedup against prior findings
-        if shouldSuppressDuplicate(ctx, p.store, f, f.PullRequestID) {
-            suppressedFindings = append(suppressedFindings, f)
+        if shouldSuppressDuplicate(ctx, p.store, *f, f.PullRequestID) {
+            reason := "duplicate"
+            f.SuppressionReason = &reason
+            suppressedFindings = append(suppressedFindings, *f)
             continue
         }
 
         // Step 3: Classify by tier
         switch {
-        case p.shouldEscalate(f):
+        case p.shouldEscalate(*f):
             // Escalated findings always go inline, regardless of confidence
-            candidates = append(candidates, f)
+            candidates = append(candidates, *f)
 
         case f.ConfidenceTier == core.ConfidenceHigh:
-            candidates = append(candidates, f)
+            candidates = append(candidates, *f)
 
         case f.ConfidenceTier == core.ConfidenceMedium:
-            summaryFindings = append(summaryFindings, f)
+            summaryFindings = append(summaryFindings, *f)
 
         default: // low confidence
-            suppressedFindings = append(suppressedFindings, f)
+            reason := "low_confidence"
+            f.SuppressionReason = &reason
+            suppressedFindings = append(suppressedFindings, *f)
         }
     }
 
-    // Step 4: Enforce inline cap
+    // Step 4: Enforce inline cap.
+    // IMPORTANT: enforceInlineCap sorts candidates in-place. The overflow
+    // slice (candidates[cap:]) depends on this sort having already happened,
+    // so that overflow contains the lowest-priority findings.
     inline = enforceInlineCap(candidates, p.maxFindingsPerPR)
-    // Overflow moves to summary
     if len(candidates) > p.maxFindingsPerPR {
         overflow := candidates[p.maxFindingsPerPR:]
         summaryFindings = append(overflow, summaryFindings...)
@@ -162,6 +190,9 @@ func (p *DefaultPolicy) Triage(ctx context.Context, findings []core.Finding) (in
 ### Inline Cap Enforcement
 
 ```go
+// enforceInlineCap sorts candidates in-place by priority and returns the top `cap` entries.
+// SIDE EFFECT: mutates the order of the candidates slice. The caller relies on this
+// mutation to correctly identify overflow findings (candidates[cap:]).
 func enforceInlineCap(candidates []core.Finding, cap int) []core.Finding {
     if len(candidates) <= cap {
         return candidates
@@ -217,22 +248,65 @@ Default `maxFindingsPerPR`: 7. Configurable.
 After triage, the pipeline hands findings to the ingest layer for posting:
 
 ```
-1. Post inline findings:
+1. Persist all findings (including suppressed) FIRST:
+   For each finding in inline + summary + suppress:
+       store.CreateFinding(ctx, &finding)
+       store.CreateFindingEvent(ctx, finding.ID, "created", "mimir", "", "", {})
+       if finding.SuppressionReason != nil:
+           store.CreateFindingEvent(ctx, finding.ID, "suppressed", "mimir",
+               "", *finding.SuppressionReason, {})
+
+2. Post inline findings:
    For each finding in `inline`:
        commentID, err := provider.PostComment(ctx, req)
        store.MarkFindingPosted(ctx, finding.ID, commentID)
+       store.CreateFindingEvent(ctx, finding.ID, "posted", "mimir",
+           "", fmt.Sprintf("comment_id=%d", commentID), {})
 
-2. Build and post summary comment:
+3. Build and post summary comment:
    body := buildSummaryComment(inline, summary, failedTasks, approximate)
    commentID, err := provider.PostSummaryComment(ctx, repoFullName, prNumber, body)
    Store commentID in pull_requests.metadata["summary_comment_id"]
-
-3. Persist all findings (including suppressed):
-   For each finding in inline + summary + suppress:
-       store.CreateFinding(ctx, &finding)
 ```
 
-All findings are persisted, even suppressed ones. This creates the audit trail for eval and allows the reaction poller to track feedback on posted findings.
+Findings are persisted **before** posting to GitHub. If posting fails (network error, rate limit), the findings are already in the database and can be retried without data loss. All findings are persisted, even suppressed ones — with their `suppression_reason` recorded — creating the audit trail for eval and allowing the reaction poller to track feedback on posted findings.
+
+### Posting Rate-Limit Awareness
+
+The posting loop checks `X-RateLimit-Remaining` after each `PostComment` call. If remaining drops below 100, pause for the duration indicated by `X-RateLimit-Reset`. If a 403/429 with rate-limit headers is returned, log the finding ID and continue to the next finding — the `PostingRetryJob` will pick it up.
+
+```go
+for _, f := range inline {
+    commentID, err := provider.PostComment(ctx, buildCommentRequest(f))
+    if err != nil {
+        if isRateLimited(err) {
+            log.Warn("rate limited during posting, remaining findings deferred to retry job",
+                zap.String("finding_id", f.ID.String()))
+            break // stop posting this run; retry job handles the rest
+        }
+        log.Error("failed to post finding", zap.String("finding_id", f.ID.String()), zap.Error(err))
+        continue // finding is persisted; retry job will pick it up
+    }
+    store.MarkFindingPosted(ctx, f.ID, commentID)
+    store.CreateFindingEvent(ctx, f.ID, "posted", "mimir", nil, ptr(fmt.Sprintf("comment_id=%d", commentID)))
+}
+```
+
+### Posting Retry Job
+
+A periodic River job (`PostingRetryJob`) runs every 5 minutes and recovers findings that were persisted but never posted due to GitHub API failures:
+
+```go
+// 1. Query ListUnpostedFindings (see store queries)
+// 2. For each finding:
+//    a. Check rate limit headroom
+//    b. PostComment
+//    c. MarkFindingPosted + CreateFindingEvent("posted")
+//    d. On failure: log and continue to next finding
+// 3. If no unposted findings remain, the job is a no-op.
+```
+
+This ensures no finding is silently lost between persist and post. The `ListUnpostedFindings` query (Spec 07) scopes to findings from completed pipeline runs within the last 7 days.
 
 ---
 

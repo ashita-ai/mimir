@@ -24,6 +24,19 @@ GitHub Webhook (pull_request: opened | synchronize | reopened)
         └── Output: core.PullRequest (normalized metadata + diff + file list)
         │
         ▼
+[index] CheckoutRepo
+        ├── Shallow blobless clone to temp directory (--filter=blob:none)
+        ├── Checkout head_sha
+        ├── Cleanup deferred to end of pipeline run
+        └── Output: repoPath (local directory path for tree-sitter)
+        │
+        ▼
+[store] CreatePipelineRun
+        ├── Record: PR ID, head_sha, prompt_version, config_hash
+        ├── Status: 'running'
+        └── Output: core.PipelineRun with ID (threaded through all downstream stages)
+        │
+        ▼
 [index] BuildSymbolTable
         ├── git diff --name-only base_sha..head_sha → changed_files
         ├── For each changed file: tree-sitter parse → extract symbols
@@ -60,16 +73,20 @@ GitHub Webhook (pull_request: opened | synchronize | reopened)
         └── Output: inline []Finding, summary []Finding, suppress []Finding
         │
         ▼
-[store] PersistFindings
+[store] PersistFindings (BEFORE posting — findings survive GitHub API failures)
         ├── Write all findings (including suppressed) to DB with fingerprints
+        ├── Record suppression_reason for each suppressed finding
+        ├── Emit 'created' finding_event for each finding
+        ├── Emit 'suppressed' finding_event for each suppressed finding
         └── Output: []core.Finding with IDs
         │
         ▼
 [ingest] PostResults
         ├── PostComment for each inline finding
         ├── PostSummaryComment with full review table
-        ├── MarkFindingPosted for each posted finding
-        └── Check addressed_in_next_commit for prior findings (content-hash diff)
+        ├── MarkFindingPosted for each posted finding (+ 'posted' finding_event)
+        ├── Check addressed_in_next_commit for prior findings (content-hash diff)
+        └── CompletePipelineRun with final task/finding counts
 ```
 
 ---
@@ -116,6 +133,8 @@ No package in `internal/` imports another `internal/` package except through int
 | Dual-hash fingerprinting | Yes | location_hash + content_hash dedup |
 | `addressed_in_next_commit` | Yes | Content-hash re-check (Option B), TEXT column |
 | Reaction-based feedback | Yes | Poll GitHub reactions, write finding_events |
+| Pipeline run audit records | Yes | Every execution creates a `pipeline_runs` row |
+| Append-only finding event log | Yes | All lifecycle transitions recorded in `finding_events` |
 | `mimir serve` | Yes | HTTP + River workers, dual mode |
 | `mimir review` | Yes | One-shot CLI, stdout output |
 | Static tool adapters | Interface only | No M1 implementations |
@@ -144,6 +163,8 @@ Three levels of concurrency, from outer to inner:
 
 **Cancellation flow:** River cancels the job context on timeout or shutdown → errgroup respects parent context → individual tasks see context cancellation and return.
 
+4. **Circuit breaker** (provider-level). Within a pipeline run, if 3 consecutive tasks fail due to provider errors (429, 5xx, network), the breaker trips and remaining tasks are immediately failed with `"circuit breaker open"`. Resets on the first successful inference. Prevents wasting budget and time against a dead provider.
+
 ---
 
 ## Error Taxonomy
@@ -157,3 +178,18 @@ Three levels of concurrency, from outer to inner:
 | **LLM permanent** | 400 bad request, 401 unauthorized | No | Mark task failed immediately, continue siblings |
 | **Parse** | Tree-sitter can't parse file | No | Skip file in index, log warning, `IsApproximate()` → true |
 | **Pipeline logic** | No changed symbols found, empty diff | No | Complete job with zero findings, post summary comment noting "no reviewable changes" |
+
+---
+
+## Data Durability Invariants
+
+These invariants hold across all pipeline stages:
+
+1. **No `ON DELETE CASCADE`.** All foreign keys use `ON DELETE RESTRICT`. Audit data is never silently destroyed.
+2. **Persist before post.** Findings are written to the database before being posted to GitHub. If posting fails, findings survive for retry.
+3. **Append-only audit log.** Every finding state transition (creation, posting, suppression, confidence adjustment, addressing, dismissal) is recorded in `finding_events`. The finding row captures current state; the events table captures history.
+4. **Soft deletes only.** `pull_requests` has a `deleted_at` column. Hard deletion requires explicit reverse-dependency-order operations.
+5. **Pipeline runs are the audit anchor.** Every pipeline execution creates a `pipeline_runs` row with config hash, prompt version, final counts, and the full model routing snapshot in `metadata`. The config hash enables quick equality checks; the `metadata` JSONB preserves the complete configuration so that no pipeline run's parameters are irrecoverable. This is the primary record for eval reproducibility.
+6. **Suppression reasons are recorded.** Every suppressed finding includes a `suppression_reason` ('duplicate', 'low_confidence', 'dismissed_fingerprint') for triage auditability.
+7. **No silent drops.** Within-run dedup losers are persisted with `suppression_reason = 'duplicate'`, not discarded. Every finding the model produces is recorded — winners and losers alike.
+8. **Posting is retried.** Findings persisted but not posted (due to GitHub API failure) are recovered by a periodic `PostingRetryJob`. No finding is silently lost between persist and post.

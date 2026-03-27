@@ -51,6 +51,9 @@ func buildSlice(ctx context.Context, task core.ReviewTask, index adapter.IndexAd
         Symbol:      task.Symbol,
         Budget:      budget,
     })
+    if err != nil {
+        return core.Slice{}, fmt.Errorf("index query: %w", err)
+    }
 
     // 2. Fill in priority order: diff → call graph → tests
     slice := core.Slice{
@@ -205,6 +208,56 @@ func executeTasks(ctx context.Context, tasks []core.ReviewTask, deps RuntimeDeps
 }
 ```
 
+### Circuit Breaker
+
+When multiple tasks fail consecutively due to provider errors, a circuit breaker prevents wasting budget and time hammering a dead endpoint:
+
+```go
+type circuitBreaker struct {
+    mu              sync.Mutex
+    consecutiveFails int
+    threshold        int  // default: 3
+    tripped          bool
+}
+
+func (cb *circuitBreaker) recordFailure(err error) {
+    if !isProviderError(err) {
+        return // only trip on provider-side errors, not validation/parse errors
+    }
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    cb.consecutiveFails++
+    if cb.consecutiveFails >= cb.threshold {
+        cb.tripped = true
+    }
+}
+
+func (cb *circuitBreaker) recordSuccess() {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    cb.consecutiveFails = 0
+    cb.tripped = false
+}
+
+func (cb *circuitBreaker) isOpen() bool {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+    return cb.tripped
+}
+```
+
+In `executeTasks`, check the breaker before launching each task:
+
+```go
+if breaker.isOpen() {
+    errStr := "circuit breaker open: provider appears unhealthy"
+    deps.Store.UpdateReviewTaskStatus(ctx, task.ID, string(core.TaskStatusFailed), &errStr)
+    return nil
+}
+```
+
+The breaker resets on the first successful inference call. It is scoped to a single pipeline run (not global), so a transient provider outage doesn't permanently block future runs.
+
 ### Task-Level Retry
 
 Inside `executeOneTask`, LLM calls get one retry:
@@ -242,7 +295,7 @@ func executeOneTask(ctx context.Context, task core.ReviewTask, deps RuntimeDeps)
 func isRetryable(err error) bool {
     // 429 (rate limit), 500, 502, 503, 529 are retryable
     // 400, 401, 403, 404 are not (bad request = bug)
-    var apiErr *APIError
+    var apiErr *core.APIError
     if errors.As(err, &apiErr) {
         return apiErr.StatusCode == 429 || apiErr.StatusCode >= 500
     }
@@ -261,7 +314,7 @@ M1 ships no `StaticToolAdapter` implementations, but the call site exists:
 // In executeOneTask, after slice building and before model inference:
 if deps.StaticTools != nil {
     for _, tool := range deps.StaticTools {
-        if !tool.SupportsLanguage(filepath.Ext(task.FilePath)) {
+        if !slices.Contains(tool.Languages(), filepath.Ext(task.FilePath)) {
             continue
         }
         staticFindings, err := tool.Run(ctx, task, []string{task.FilePath})
@@ -286,22 +339,57 @@ This call site is a no-op when `deps.StaticTools` is empty (the M1 default). M2 
 Multiple tasks for the same PR may produce findings for the same location (e.g., a `security` and `logic` task both flag the same line). Before returning findings to the policy layer:
 
 ```go
-func deduplicateFindings(findings []core.Finding) []core.Finding {
+// deduplicateResult holds the winners (to post/triage) and losers (to persist with
+// suppression reason for audit). No finding is silently dropped.
+type deduplicateResult struct {
+    kept       []core.Finding
+    suppressed []core.Finding // losers: same location, lower confidence
+}
+
+func deduplicateFindings(findings []core.Finding) deduplicateResult {
     seen := make(map[string]int) // location_hash → index of best finding
+    loserIndices := make(map[int]bool)
+
     for i, f := range findings {
         if prev, ok := seen[f.LocationHash]; ok {
-            // Keep the one with higher confidence
+            // Keep the one with higher confidence; mark loser for suppression
             if f.ConfidenceScore > findings[prev].ConfidenceScore {
+                loserIndices[prev] = true
+                delete(loserIndices, i)
                 seen[f.LocationHash] = i
+            } else {
+                loserIndices[i] = true
             }
         } else {
             seen[f.LocationHash] = i
         }
     }
-    result := make([]core.Finding, 0, len(seen))
+
+    // Collect winners and sort by confidence descending for deterministic output.
+    // Map iteration order in Go is random; without sorting, identical inputs
+    // could produce differently-ordered outputs across runs, which breaks
+    // eval reproducibility and makes the summary comment order non-deterministic.
+    indices := make([]int, 0, len(seen))
     for _, idx := range seen {
-        result = append(result, findings[idx])
+        indices = append(indices, idx)
     }
-    return result
+    sort.Slice(indices, func(i, j int) bool {
+        return findings[indices[i]].ConfidenceScore > findings[indices[j]].ConfidenceScore
+    })
+    kept := make([]core.Finding, 0, len(indices))
+    for _, idx := range indices {
+        kept = append(kept, findings[idx])
+    }
+
+    // Mark losers with suppression reason so they are persisted for audit.
+    suppressed := make([]core.Finding, 0, len(loserIndices))
+    for idx := range loserIndices {
+        f := findings[idx]
+        reason := "duplicate"
+        f.SuppressionReason = &reason
+        suppressed = append(suppressed, f)
+    }
+
+    return deduplicateResult{kept: kept, suppressed: suppressed}
 }
 ```

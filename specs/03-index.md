@@ -18,6 +18,60 @@
 
 ---
 
+## Repo Checkout Strategy
+
+Tree-sitter requires files on disk. The pipeline cannot operate solely on GitHub API responses (which provide diffs and metadata, not the full working tree). Each pipeline run must have a local checkout of the repository at the head SHA.
+
+### M1 Implementation
+
+```go
+// checkoutRepo creates a shallow clone of the repo at the given SHA.
+// Returns the path to the checkout directory and a cleanup function.
+func checkoutRepo(ctx context.Context, repoFullName, headSHA, baseSHA, token string) (string, func(), error) {
+    dir, err := os.MkdirTemp("", "mimir-checkout-*")
+    if err != nil {
+        return "", nil, fmt.Errorf("create temp dir: %w", err)
+    }
+    cleanup := func() { os.RemoveAll(dir) }
+
+    // Shallow clone with only the commits we need.
+    // --filter=blob:none fetches tree structure immediately but defers blob
+    // downloads until checkout, reducing clone time for large repos.
+    cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s.git", token, repoFullName)
+    cmds := [][]string{
+        {"git", "clone", "--filter=blob:none", "--no-checkout", "--single-branch", cloneURL, dir},
+        {"git", "-C", dir, "fetch", "origin", headSHA, "--depth=1"},
+        {"git", "-C", dir, "checkout", headSHA},
+    }
+    for _, args := range cmds {
+        cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+        if out, err := cmd.CombinedOutput(); err != nil {
+            cleanup()
+            return "", nil, fmt.Errorf("git %s: %w: %s", args[1], err, out)
+        }
+    }
+
+    return dir, cleanup, nil
+}
+```
+
+### Lifecycle
+
+1. **Created** at the start of the River job handler, before `BuildSymbolTable`.
+2. **Used** by `BuildSymbolTable` and `Query` (via the `repoPath` parameter on `IndexAdapter`).
+3. **Used** by `addressed_in_next_commit` (re-parsing files at the new head SHA).
+4. **Cleaned up** via the `cleanup` function after `CompletePipelineRun`, in a `defer`. The checkout directory is ephemeral — it does not survive process restarts. If River re-enqueues the job, a fresh checkout is created.
+
+### Security
+
+The clone URL uses the installation token (or PAT), not embedded credentials. The temp directory is created with restrictive permissions (`0700` via `os.MkdirTemp` defaults). The cleanup function runs even on panic via `defer`.
+
+### Disk Budget
+
+A blobless clone of a typical 10k-file Go repo is ~50–100 MB on disk. With 5 concurrent workers, peak disk usage is ~500 MB. For repos exceeding 1 GB, M2 can add sparse checkout (clone only changed files + their importers). M1 uses full checkout for simplicity.
+
+---
+
 ## Language Support Matrix
 
 | Language | Grammar | Import Analysis | Test Heuristic | `IsApproximate()` |
