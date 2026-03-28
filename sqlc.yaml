@@ -1,0 +1,28 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/store/queries/"
+    schema: "internal/store/migrations/"
+    gen:
+      go:
+        package: "dbsqlc"
+        out: "internal/store/dbsqlc"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+            nullable: false
+          - db_type: "timestamptz"
+            go_type:
+              import: "time"
+              type: "Time"
+              pointer: true
+            nullable: true
+          - db_type: "jsonb"
+            go_type:
+              import: "encoding/json"
+              type: "RawMessage"

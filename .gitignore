@@ -18,8 +18,8 @@ bin/
 *.out
 vendor/
 
-# sqlc generated (re-generated via `make generate`)
-internal/store/db/
+# sqlc generated code is committed (ensures `go install` works without sqlc).
+# Do NOT gitignore internal/store/dbsqlc/.
 
 # golangci-lint cache
 .golangci-cache/
