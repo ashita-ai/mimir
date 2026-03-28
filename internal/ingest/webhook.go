@@ -31,7 +31,7 @@ type WebhookHandler struct {
 	OnPREvent func(ctx context.Context, event PREvent) error
 
 	// Secret is the GitHub webhook secret for HMAC validation.
-	// If nil, signature validation is skipped (useful for local dev).
+	// Must be non-empty; the serve command enforces this at startup.
 	Secret []byte
 
 	Logger *zap.Logger

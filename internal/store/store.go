@@ -231,7 +231,11 @@ func (s *Store) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID) 
 
 	findings := make([]core.Finding, len(rows))
 	for i, row := range rows {
-		findings[i] = findingFromRow(row)
+		f, err := findingFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("store: convert finding row %d: %w", i, err)
+		}
+		findings[i] = f
 	}
 	return findings, nil
 }
@@ -344,7 +348,7 @@ func reviewTaskFromRow(row dbsqlc.ReviewTask) core.ReviewTask {
 }
 
 // findingFromRow converts a sqlc-generated Finding to a core.Finding.
-func findingFromRow(row dbsqlc.Finding) core.Finding {
+func findingFromRow(row dbsqlc.Finding) (core.Finding, error) {
 	f := core.Finding{
 		ID:                    row.ID,
 		ReviewTaskID:          row.ReviewTaskID,
@@ -375,8 +379,10 @@ func findingFromRow(row dbsqlc.Finding) core.Finding {
 	}
 
 	if row.Metadata != nil {
-		_ = json.Unmarshal(row.Metadata, &f.Metadata)
+		if err := json.Unmarshal(row.Metadata, &f.Metadata); err != nil {
+			return core.Finding{}, fmt.Errorf("unmarshal finding metadata: %w", err)
+		}
 	}
 
-	return f
+	return f, nil
 }

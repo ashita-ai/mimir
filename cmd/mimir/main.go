@@ -139,6 +139,9 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 			errCh := make(chan error, 1)
 			if enableHTTP {
 				webhookSecret := os.Getenv("MIMIR_WEBHOOK_SECRET")
+				if webhookSecret == "" {
+					return fmt.Errorf("MIMIR_WEBHOOK_SECRET is required when HTTP is enabled (set --http=false for worker-only mode)")
+				}
 
 				r := chi.NewRouter()
 				r.Use(middleware.RequestID)
