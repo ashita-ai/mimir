@@ -6,6 +6,9 @@ bin/
 .env.local
 .env.*.local
 
+# Conductor workspaces
+.context/
+
 # Editor
 .idea/
 .vscode/
