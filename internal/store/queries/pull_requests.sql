@@ -13,6 +13,11 @@ RETURNING id, created_at, updated_at;
 -- name: GetPullRequest :one
 SELECT id, github_pr_id, repo_full_name, pr_number,
        head_sha, base_sha, author, state, metadata,
-       created_at, updated_at
+       deleted_at, created_at, updated_at
 FROM pull_requests
 WHERE id = $1;
+
+-- name: SoftDeletePullRequest :execrows
+UPDATE pull_requests
+SET deleted_at = now()
+WHERE id = $1 AND deleted_at IS NULL;

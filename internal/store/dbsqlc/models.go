@@ -24,6 +24,7 @@ type Finding struct {
 	ID                    uuid.UUID       `json:"id"`
 	ReviewTaskID          uuid.UUID       `json:"review_task_id"`
 	PullRequestID         uuid.UUID       `json:"pull_request_id"`
+	PipelineRunID         uuid.UUID       `json:"pipeline_run_id"`
 	FilePath              string          `json:"file_path"`
 	StartLine             pgtype.Int4     `json:"start_line"`
 	EndLine               pgtype.Int4     `json:"end_line"`
@@ -37,9 +38,11 @@ type Finding struct {
 	Suggestion            pgtype.Text     `json:"suggestion"`
 	LocationHash          string          `json:"location_hash"`
 	ContentHash           pgtype.Text     `json:"content_hash"`
+	HeadSha               string          `json:"head_sha"`
 	PostedAt              *time.Time      `json:"posted_at"`
 	GithubCommentID       pgtype.Int8     `json:"github_comment_id"`
 	AddressedInNextCommit bool            `json:"addressed_in_next_commit"`
+	SuppressionReason     pgtype.Text     `json:"suppression_reason"`
 	DismissedAt           *time.Time      `json:"dismissed_at"`
 	DismissedBy           pgtype.Text     `json:"dismissed_by"`
 	ModelID               string          `json:"model_id"`
@@ -48,6 +51,34 @@ type Finding struct {
 	Metadata              json.RawMessage `json:"metadata"`
 	CreatedAt             time.Time       `json:"created_at"`
 	UpdatedAt             time.Time       `json:"updated_at"`
+}
+
+type FindingEvent struct {
+	ID        uuid.UUID       `json:"id"`
+	FindingID uuid.UUID       `json:"finding_id"`
+	EventType string          `json:"event_type"`
+	Actor     string          `json:"actor"`
+	OldValue  pgtype.Text     `json:"old_value"`
+	NewValue  pgtype.Text     `json:"new_value"`
+	Metadata  json.RawMessage `json:"metadata"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+type PipelineRun struct {
+	ID            uuid.UUID       `json:"id"`
+	PullRequestID uuid.UUID       `json:"pull_request_id"`
+	HeadSha       string          `json:"head_sha"`
+	Status        string          `json:"status"`
+	PromptVersion string          `json:"prompt_version"`
+	ConfigHash    string          `json:"config_hash"`
+	TaskCount     int32           `json:"task_count"`
+	FindingCount  int32           `json:"finding_count"`
+	Error         pgtype.Text     `json:"error"`
+	Metadata      json.RawMessage `json:"metadata"`
+	StartedAt     time.Time       `json:"started_at"`
+	CompletedAt   *time.Time      `json:"completed_at"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 type PullRequest struct {
@@ -60,6 +91,7 @@ type PullRequest struct {
 	Author       string          `json:"author"`
 	State        string          `json:"state"`
 	Metadata     json.RawMessage `json:"metadata"`
+	DeletedAt    *time.Time      `json:"deleted_at"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
@@ -67,10 +99,13 @@ type PullRequest struct {
 type ReviewTask struct {
 	ID            uuid.UUID   `json:"id"`
 	PullRequestID uuid.UUID   `json:"pull_request_id"`
+	PipelineRunID uuid.UUID   `json:"pipeline_run_id"`
 	TaskType      string      `json:"task_type"`
 	FilePath      string      `json:"file_path"`
 	Symbol        pgtype.Text `json:"symbol"`
 	RiskScore     float64     `json:"risk_score"`
+	ModelID       string      `json:"model_id"`
+	DiffHunk      pgtype.Text `json:"diff_hunk"`
 	Status        string      `json:"status"`
 	Error         pgtype.Text `json:"error"`
 	StartedAt     *time.Time  `json:"started_at"`

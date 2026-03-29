@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pressly/goose/v3"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -75,8 +76,11 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, *store.Store) {
 	_, err = provider.Up(ctx)
 	require.NoError(t, err)
 
-	// Truncate tables before each test.
-	tables := []string{"findings", "review_tasks", "pull_requests", "dismissed_fingerprints"}
+	// Truncate tables before each test (order matters for FK constraints).
+	tables := []string{
+		"finding_events", "findings", "review_tasks",
+		"pipeline_runs", "dismissed_fingerprints", "pull_requests",
+	}
 	for _, table := range tables {
 		_, err := pool.Exec(ctx, fmt.Sprintf("TRUNCATE %s CASCADE", table))
 		require.NoError(t, err)
@@ -123,6 +127,7 @@ func TestUpsertAndGetPullRequest(t *testing.T) {
 	assert.Equal(t, pr.HeadSHA, got.HeadSHA)
 	assert.Equal(t, pr.Author, got.Author)
 	assert.Equal(t, "test", got.Metadata["source"])
+	assert.Nil(t, got.DeletedAt)
 
 	// Upsert same (github_pr_id, head_sha) — should update, not insert.
 	pr.State = core.PRStateMerged
@@ -142,6 +147,102 @@ func TestGetPullRequest_NotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSoftDeletePullRequest(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+
+	err := st.SoftDeletePullRequest(ctx, pr.ID)
+	require.NoError(t, err)
+
+	got, err := st.GetPullRequest(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.NotNil(t, got.DeletedAt)
+
+	// Double soft-delete should fail (already deleted).
+	err = st.SoftDeletePullRequest(ctx, pr.ID)
+	require.Error(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// PipelineRun tests
+// ---------------------------------------------------------------------------
+
+func TestCreateAndGetPipelineRun(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+
+	run := &core.PipelineRun{
+		PullRequestID: pr.ID,
+		HeadSHA:       pr.HeadSHA,
+		PromptVersion: "v1.0",
+		ConfigHash:    "abc123",
+		Metadata:      map[string]any{"test": true},
+	}
+
+	err := st.CreatePipelineRun(ctx, run)
+	require.NoError(t, err)
+	assert.NotEqual(t, uuid.Nil, run.ID)
+	assert.Equal(t, core.PipelineRunStatusRunning, run.Status)
+
+	got, err := st.GetPipelineRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, run.ID, got.ID)
+	assert.Equal(t, pr.ID, got.PullRequestID)
+	assert.Equal(t, "v1.0", got.PromptVersion)
+	assert.Equal(t, core.PipelineRunStatusRunning, got.Status)
+}
+
+func TestCompletePipelineRun(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+
+	err := st.CompletePipelineRun(ctx, run.ID, core.PipelineRunStatusCompleted, 5, 3, nil)
+	require.NoError(t, err)
+
+	got, err := st.GetPipelineRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, core.PipelineRunStatusCompleted, got.Status)
+	assert.Equal(t, 5, got.TaskCount)
+	assert.Equal(t, 3, got.FindingCount)
+	assert.NotNil(t, got.CompletedAt)
+}
+
+func TestReconcileStalePipelineRuns(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+
+	n, err := st.ReconcileStalePipelineRuns(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	got, err := st.GetPipelineRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, core.PipelineRunStatusFailed, got.Status)
+	assert.Contains(t, *got.Error, "reconciled")
+}
+
+func TestListPipelineRunsForPR(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+
+	runs, err := st.ListPipelineRunsForPR(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.Len(t, runs, 1)
+}
+
 // ---------------------------------------------------------------------------
 // ReviewTask tests
 // ---------------------------------------------------------------------------
@@ -151,13 +252,16 @@ func TestCreateAndListReviewTasks(t *testing.T) {
 	ctx := context.Background()
 
 	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
 
 	task := &core.ReviewTask{
 		PullRequestID: pr.ID,
+		PipelineRunID: run.ID,
 		TaskType:      core.TaskTypeSecurity,
 		FilePath:      "internal/auth/token.go",
 		Symbol:        "ValidateToken",
 		RiskScore:     0.85,
+		ModelID:       "claude-opus-4-6",
 	}
 
 	err := st.CreateReviewTask(ctx, task)
@@ -171,6 +275,8 @@ func TestCreateAndListReviewTasks(t *testing.T) {
 	require.Len(t, pending, 1)
 	assert.Equal(t, task.ID, pending[0].ID)
 	assert.Equal(t, "ValidateToken", pending[0].Symbol)
+	assert.Equal(t, "claude-opus-4-6", pending[0].ModelID)
+	assert.Equal(t, run.ID, pending[0].PipelineRunID)
 }
 
 func TestUpdateReviewTaskStatus(t *testing.T) {
@@ -178,7 +284,8 @@ func TestUpdateReviewTaskStatus(t *testing.T) {
 	ctx := context.Background()
 
 	pr := insertTestPR(t, st)
-	task := insertTestTask(t, st, pr.ID)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
 
 	// Transition to running — should set started_at.
 	err := st.UpdateReviewTaskStatus(ctx, task.ID, core.TaskStatusRunning, nil)
@@ -213,12 +320,14 @@ func TestCreateAndListFindings(t *testing.T) {
 	ctx := context.Background()
 
 	pr := insertTestPR(t, st)
-	task := insertTestTask(t, st, pr.ID)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
 
 	line := 42
 	f := &core.Finding{
 		ReviewTaskID:    task.ID,
 		PullRequestID:   pr.ID,
+		PipelineRunID:   run.ID,
 		FilePath:        "internal/auth/token.go",
 		StartLine:       &line,
 		Symbol:          "ValidateToken",
@@ -229,6 +338,7 @@ func TestCreateAndListFindings(t *testing.T) {
 		Title:           "Unchecked JWT expiry",
 		Body:            "The token validation does not verify the exp claim.",
 		LocationHash:    core.ComputeLocationHash("ashita-ai/mimir", "internal/auth/token.go", "ValidateToken", core.CategorySecurity),
+		HeadSHA:         pr.HeadSHA,
 		ModelID:         "claude-opus-4-6",
 		Metadata:        map[string]any{},
 	}
@@ -245,6 +355,8 @@ func TestCreateAndListFindings(t *testing.T) {
 	assert.Equal(t, 0.92, findings[0].ConfidenceScore)
 	assert.Equal(t, core.SeverityHigh, findings[0].Severity)
 	assert.Equal(t, 42, *findings[0].StartLine)
+	assert.Equal(t, run.ID, findings[0].PipelineRunID)
+	assert.Equal(t, pr.HeadSHA, findings[0].HeadSHA)
 }
 
 func TestMarkFindingPosted(t *testing.T) {
@@ -252,8 +364,9 @@ func TestMarkFindingPosted(t *testing.T) {
 	ctx := context.Background()
 
 	pr := insertTestPR(t, st)
-	task := insertTestTask(t, st, pr.ID)
-	f := insertTestFinding(t, st, pr.ID, task.ID)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
+	f := insertTestFinding(t, st, pr.ID, run.ID, task.ID, pr.HeadSHA)
 
 	err := st.MarkFindingPosted(ctx, f.ID, 999888)
 	require.NoError(t, err)
@@ -271,8 +384,9 @@ func TestMarkFindingAddressed(t *testing.T) {
 	ctx := context.Background()
 
 	pr := insertTestPR(t, st)
-	task := insertTestTask(t, st, pr.ID)
-	f := insertTestFinding(t, st, pr.ID, task.ID)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
+	f := insertTestFinding(t, st, pr.ID, run.ID, task.ID, pr.HeadSHA)
 
 	err := st.MarkFindingAddressed(ctx, f.ID)
 	require.NoError(t, err)
@@ -288,18 +402,97 @@ func TestFindingLocationHashUniqueness(t *testing.T) {
 	ctx := context.Background()
 
 	pr := insertTestPR(t, st)
-	task := insertTestTask(t, st, pr.ID)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
 
 	hash := core.ComputeLocationHash("repo", "file.go", "Fn", core.CategoryLogic)
 
-	f1 := makeFinding(pr.ID, task.ID, hash)
+	f1 := makeFinding(pr.ID, run.ID, task.ID, hash, pr.HeadSHA)
 	err := st.CreateFinding(ctx, f1)
 	require.NoError(t, err)
 
-	// Same location_hash + same PR should violate the unique index.
-	f2 := makeFinding(pr.ID, task.ID, hash)
+	// Same location_hash + same PR + same head_sha should violate the unique index.
+	f2 := makeFinding(pr.ID, run.ID, task.ID, hash, pr.HeadSHA)
 	err = st.CreateFinding(ctx, f2)
-	require.Error(t, err, "duplicate (location_hash, pull_request_id) should fail")
+	require.Error(t, err, "duplicate (location_hash, pull_request_id, head_sha) should fail")
+}
+
+func TestFindPriorFinding(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
+
+	hash := core.ComputeLocationHash("ashita-ai/mimir", "file.go", "Fn", core.CategoryLogic)
+	f := makeFinding(pr.ID, run.ID, task.ID, hash, pr.HeadSHA)
+	require.NoError(t, st.CreateFinding(ctx, f))
+
+	// Should find prior finding.
+	prior, err := st.FindPriorFinding(ctx, hash, "ashita-ai/mimir")
+	require.NoError(t, err)
+	require.NotNil(t, prior)
+	assert.Equal(t, f.ID, prior.ID)
+
+	// Different repo — should not find.
+	prior, err = st.FindPriorFinding(ctx, hash, "other/repo")
+	require.NoError(t, err)
+	assert.Nil(t, prior)
+}
+
+func TestListUnaddressedFindings(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
+	f := insertTestFinding(t, st, pr.ID, run.ID, task.ID, pr.HeadSHA)
+
+	// Not posted yet — should not appear.
+	unaddressed, err := st.ListUnaddressedFindings(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.Empty(t, unaddressed)
+
+	// Post it.
+	require.NoError(t, st.MarkFindingPosted(ctx, f.ID, 123))
+
+	// Now should appear.
+	unaddressed, err = st.ListUnaddressedFindings(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.Len(t, unaddressed, 1)
+
+	// Address it.
+	require.NoError(t, st.MarkFindingAddressed(ctx, f.ID))
+
+	// Should disappear.
+	unaddressed, err = st.ListUnaddressedFindings(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.Empty(t, unaddressed)
+}
+
+func TestListUnpostedFindings(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
+	f := insertTestFinding(t, st, pr.ID, run.ID, task.ID, pr.HeadSHA)
+
+	// Should appear (not posted, not suppressed).
+	unposted, err := st.ListUnpostedFindings(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.Len(t, unposted, 1)
+
+	// Post it.
+	require.NoError(t, st.MarkFindingPosted(ctx, f.ID, 123))
+
+	// Should disappear.
+	unposted, err = st.ListUnpostedFindings(ctx, pr.ID)
+	require.NoError(t, err)
+	assert.Empty(t, unposted)
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +500,7 @@ func TestFindingLocationHashUniqueness(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsFingerprintDismissed(t *testing.T) {
-	pool, st := setupTestDB(t)
+	_, st := setupTestDB(t)
 	ctx := context.Background()
 
 	hash := "abc123hash"
@@ -318,11 +511,8 @@ func TestIsFingerprintDismissed(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, dismissed)
 
-	// Insert a dismissal directly.
-	_, err = pool.Exec(ctx,
-		`INSERT INTO dismissed_fingerprints (fingerprint, repo_full_name, dismissed_by, reason) VALUES ($1, $2, $3, $4)`,
-		hash, repo, "reviewer", "false positive",
-	)
+	// Dismiss it.
+	err = st.DismissFingerprint(ctx, hash, repo, "reviewer", "false positive")
 	require.NoError(t, err)
 
 	// Now it should be dismissed.
@@ -334,6 +524,107 @@ func TestIsFingerprintDismissed(t *testing.T) {
 	dismissed, err = st.IsFingerprintDismissed(ctx, hash, "other/repo")
 	require.NoError(t, err)
 	assert.False(t, dismissed)
+
+	// Upsert should not error.
+	err = st.DismissFingerprint(ctx, hash, repo, "reviewer2", "updated reason")
+	require.NoError(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// FindingEvent tests
+// ---------------------------------------------------------------------------
+
+func TestCreateAndListFindingEvents(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+	run := insertTestPipelineRun(t, st, pr.ID, pr.HeadSHA)
+	task := insertTestTask(t, st, pr.ID, run.ID)
+	f := insertTestFinding(t, st, pr.ID, run.ID, task.ID, pr.HeadSHA)
+
+	event := &core.FindingEvent{
+		FindingID: f.ID,
+		EventType: "reaction",
+		Actor:     "testuser",
+		NewValue:  "+1",
+		Metadata:  map[string]any{},
+	}
+
+	err := st.CreateFindingEvent(ctx, event)
+	require.NoError(t, err)
+	assert.NotEqual(t, uuid.Nil, event.ID)
+	assert.False(t, event.CreatedAt.IsZero())
+
+	events, err := st.ListEventsForFinding(ctx, f.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "reaction", events[0].EventType)
+	assert.Equal(t, "testuser", events[0].Actor)
+	assert.Equal(t, "+1", events[0].NewValue)
+}
+
+// ---------------------------------------------------------------------------
+// WithTx test
+// ---------------------------------------------------------------------------
+
+func TestWithTx_Commit(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	var prID uuid.UUID
+	err := st.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
+		pr := &core.PullRequest{
+			GitHubPRID:   time.Now().UnixNano(),
+			RepoFullName: "ashita-ai/mimir",
+			PRNumber:     99,
+			HeadSHA:      "txtest",
+			BaseSHA:      "base",
+			Author:       "txuser",
+			State:        core.PRStateOpen,
+			Metadata:     map[string]any{},
+		}
+		if err := txStore.UpsertPullRequest(ctx, pr); err != nil {
+			return err
+		}
+		prID = pr.ID
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Should be visible outside tx.
+	got, err := st.GetPullRequest(ctx, prID)
+	require.NoError(t, err)
+	assert.Equal(t, "txtest", got.HeadSHA)
+}
+
+func TestWithTx_Rollback(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	var prID uuid.UUID
+	err := st.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
+		pr := &core.PullRequest{
+			GitHubPRID:   time.Now().UnixNano(),
+			RepoFullName: "ashita-ai/mimir",
+			PRNumber:     99,
+			HeadSHA:      "rollbacktest",
+			BaseSHA:      "base",
+			Author:       "txuser",
+			State:        core.PRStateOpen,
+			Metadata:     map[string]any{},
+		}
+		if err := txStore.UpsertPullRequest(ctx, pr); err != nil {
+			return err
+		}
+		prID = pr.ID
+		return fmt.Errorf("simulated error")
+	})
+	require.Error(t, err)
+
+	// Should NOT be visible — rolled back.
+	_, err = st.GetPullRequest(ctx, prID)
+	require.Error(t, err)
 }
 
 // ---------------------------------------------------------------------------
@@ -356,31 +647,47 @@ func insertTestPR(t *testing.T, st *store.Store) *core.PullRequest {
 	return pr
 }
 
-func insertTestTask(t *testing.T, st *store.Store, prID uuid.UUID) *core.ReviewTask {
+func insertTestPipelineRun(t *testing.T, st *store.Store, prID uuid.UUID, headSHA string) *core.PipelineRun {
+	t.Helper()
+	run := &core.PipelineRun{
+		PullRequestID: prID,
+		HeadSHA:       headSHA,
+		PromptVersion: "v1.0-test",
+		ConfigHash:    "testhash",
+		Metadata:      map[string]any{},
+	}
+	require.NoError(t, st.CreatePipelineRun(context.Background(), run))
+	return run
+}
+
+func insertTestTask(t *testing.T, st *store.Store, prID, runID uuid.UUID) *core.ReviewTask {
 	t.Helper()
 	task := &core.ReviewTask{
 		PullRequestID: prID,
+		PipelineRunID: runID,
 		TaskType:      core.TaskTypeSecurity,
 		FilePath:      "internal/auth/token.go",
 		Symbol:        "ValidateToken",
 		RiskScore:     0.8,
+		ModelID:       "test-model",
 	}
 	require.NoError(t, st.CreateReviewTask(context.Background(), task))
 	return task
 }
 
-func insertTestFinding(t *testing.T, st *store.Store, prID, taskID uuid.UUID) *core.Finding {
+func insertTestFinding(t *testing.T, st *store.Store, prID, runID, taskID uuid.UUID, headSHA string) *core.Finding {
 	t.Helper()
-	f := makeFinding(prID, taskID, core.ComputeLocationHash("ashita-ai/mimir", "file.go", "Fn", core.CategoryLogic))
+	f := makeFinding(prID, runID, taskID, core.ComputeLocationHash("ashita-ai/mimir", "file.go", "Fn", core.CategoryLogic), headSHA)
 	require.NoError(t, st.CreateFinding(context.Background(), f))
 	return f
 }
 
-func makeFinding(prID, taskID uuid.UUID, locationHash string) *core.Finding {
+func makeFinding(prID, runID, taskID uuid.UUID, locationHash, headSHA string) *core.Finding {
 	line := 10
 	return &core.Finding{
 		ReviewTaskID:    taskID,
 		PullRequestID:   prID,
+		PipelineRunID:   runID,
 		FilePath:        "file.go",
 		StartLine:       &line,
 		Symbol:          "Fn",
@@ -391,6 +698,7 @@ func makeFinding(prID, taskID uuid.UUID, locationHash string) *core.Finding {
 		Title:           "Test finding",
 		Body:            "This is a test finding.",
 		LocationHash:    locationHash,
+		HeadSHA:         headSHA,
 		ModelID:         "test-model",
 		Metadata:        map[string]any{},
 	}

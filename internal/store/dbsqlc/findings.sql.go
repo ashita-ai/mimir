@@ -16,19 +16,19 @@ import (
 
 const createFinding = `-- name: CreateFinding :one
 INSERT INTO findings (
-    id, review_task_id, pull_request_id,
+    id, review_task_id, pull_request_id, pipeline_run_id,
     file_path, start_line, end_line, symbol,
     category, confidence_tier, confidence_score, severity,
     title, body, suggestion,
-    location_hash, content_hash,
+    location_hash, content_hash, head_sha,
     model_id, prompt_tokens, completion_tokens, metadata
 ) VALUES (
-    $1, $2, $3,
-    $4, $5, $6, $7,
-    $8, $9, $10, $11,
-    $12, $13, $14,
-    $15, $16,
-    $17, $18, $19, $20
+    $1, $2, $3, $4,
+    $5, $6, $7, $8,
+    $9, $10, $11, $12,
+    $13, $14, $15,
+    $16, $17, $18,
+    $19, $20, $21, $22
 )
 RETURNING created_at, updated_at
 `
@@ -37,6 +37,7 @@ type CreateFindingParams struct {
 	ID               uuid.UUID       `json:"id"`
 	ReviewTaskID     uuid.UUID       `json:"review_task_id"`
 	PullRequestID    uuid.UUID       `json:"pull_request_id"`
+	PipelineRunID    uuid.UUID       `json:"pipeline_run_id"`
 	FilePath         string          `json:"file_path"`
 	StartLine        pgtype.Int4     `json:"start_line"`
 	EndLine          pgtype.Int4     `json:"end_line"`
@@ -50,6 +51,7 @@ type CreateFindingParams struct {
 	Suggestion       pgtype.Text     `json:"suggestion"`
 	LocationHash     string          `json:"location_hash"`
 	ContentHash      pgtype.Text     `json:"content_hash"`
+	HeadSha          string          `json:"head_sha"`
 	ModelID          string          `json:"model_id"`
 	PromptTokens     pgtype.Int4     `json:"prompt_tokens"`
 	CompletionTokens pgtype.Int4     `json:"completion_tokens"`
@@ -66,6 +68,7 @@ func (q *Queries) CreateFinding(ctx context.Context, arg CreateFindingParams) (C
 		arg.ID,
 		arg.ReviewTaskID,
 		arg.PullRequestID,
+		arg.PipelineRunID,
 		arg.FilePath,
 		arg.StartLine,
 		arg.EndLine,
@@ -79,6 +82,7 @@ func (q *Queries) CreateFinding(ctx context.Context, arg CreateFindingParams) (C
 		arg.Suggestion,
 		arg.LocationHash,
 		arg.ContentHash,
+		arg.HeadSha,
 		arg.ModelID,
 		arg.PromptTokens,
 		arg.CompletionTokens,
@@ -86,6 +90,67 @@ func (q *Queries) CreateFinding(ctx context.Context, arg CreateFindingParams) (C
 	)
 	var i CreateFindingRow
 	err := row.Scan(&i.CreatedAt, &i.UpdatedAt)
+	return i, err
+}
+
+const findPriorFinding = `-- name: FindPriorFinding :one
+SELECT f.id, f.review_task_id, f.pull_request_id, f.pipeline_run_id,
+       f.file_path, f.start_line, f.end_line, f.symbol,
+       f.category, f.confidence_tier, f.confidence_score, f.severity,
+       f.title, f.body, f.suggestion,
+       f.location_hash, f.content_hash, f.head_sha,
+       f.posted_at, f.github_comment_id, f.addressed_in_next_commit,
+       f.suppression_reason, f.dismissed_at, f.dismissed_by,
+       f.model_id, f.prompt_tokens, f.completion_tokens, f.metadata,
+       f.created_at, f.updated_at
+FROM findings f
+JOIN pull_requests pr ON f.pull_request_id = pr.id
+WHERE f.location_hash = $1
+  AND pr.repo_full_name = $2
+ORDER BY f.created_at DESC
+LIMIT 1
+`
+
+type FindPriorFindingParams struct {
+	LocationHash string `json:"location_hash"`
+	RepoFullName string `json:"repo_full_name"`
+}
+
+func (q *Queries) FindPriorFinding(ctx context.Context, arg FindPriorFindingParams) (Finding, error) {
+	row := q.db.QueryRow(ctx, findPriorFinding, arg.LocationHash, arg.RepoFullName)
+	var i Finding
+	err := row.Scan(
+		&i.ID,
+		&i.ReviewTaskID,
+		&i.PullRequestID,
+		&i.PipelineRunID,
+		&i.FilePath,
+		&i.StartLine,
+		&i.EndLine,
+		&i.Symbol,
+		&i.Category,
+		&i.ConfidenceTier,
+		&i.ConfidenceScore,
+		&i.Severity,
+		&i.Title,
+		&i.Body,
+		&i.Suggestion,
+		&i.LocationHash,
+		&i.ContentHash,
+		&i.HeadSha,
+		&i.PostedAt,
+		&i.GithubCommentID,
+		&i.AddressedInNextCommit,
+		&i.SuppressionReason,
+		&i.DismissedAt,
+		&i.DismissedBy,
+		&i.ModelID,
+		&i.PromptTokens,
+		&i.CompletionTokens,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
 	return i, err
 }
 
@@ -109,13 +174,13 @@ func (q *Queries) IsFingerprintDismissed(ctx context.Context, arg IsFingerprintD
 }
 
 const listFindingsForPR = `-- name: ListFindingsForPR :many
-SELECT id, review_task_id, pull_request_id,
+SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        file_path, start_line, end_line, symbol,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
-       location_hash, content_hash,
+       location_hash, content_hash, head_sha,
        posted_at, github_comment_id, addressed_in_next_commit,
-       dismissed_at, dismissed_by,
+       suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
 FROM findings
@@ -143,6 +208,7 @@ func (q *Queries) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID
 			&i.ID,
 			&i.ReviewTaskID,
 			&i.PullRequestID,
+			&i.PipelineRunID,
 			&i.FilePath,
 			&i.StartLine,
 			&i.EndLine,
@@ -156,9 +222,147 @@ func (q *Queries) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID
 			&i.Suggestion,
 			&i.LocationHash,
 			&i.ContentHash,
+			&i.HeadSha,
 			&i.PostedAt,
 			&i.GithubCommentID,
 			&i.AddressedInNextCommit,
+			&i.SuppressionReason,
+			&i.DismissedAt,
+			&i.DismissedBy,
+			&i.ModelID,
+			&i.PromptTokens,
+			&i.CompletionTokens,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnaddressedFindings = `-- name: ListUnaddressedFindings :many
+SELECT id, review_task_id, pull_request_id, pipeline_run_id,
+       file_path, start_line, end_line, symbol,
+       category, confidence_tier, confidence_score, severity,
+       title, body, suggestion,
+       location_hash, content_hash, head_sha,
+       posted_at, github_comment_id, addressed_in_next_commit,
+       suppression_reason, dismissed_at, dismissed_by,
+       model_id, prompt_tokens, completion_tokens, metadata,
+       created_at, updated_at
+FROM findings
+WHERE pull_request_id = $1
+  AND posted_at IS NOT NULL
+  AND addressed_in_next_commit = FALSE
+ORDER BY created_at ASC
+`
+
+func (q *Queries) ListUnaddressedFindings(ctx context.Context, pullRequestID uuid.UUID) ([]Finding, error) {
+	rows, err := q.db.Query(ctx, listUnaddressedFindings, pullRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Finding{}
+	for rows.Next() {
+		var i Finding
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReviewTaskID,
+			&i.PullRequestID,
+			&i.PipelineRunID,
+			&i.FilePath,
+			&i.StartLine,
+			&i.EndLine,
+			&i.Symbol,
+			&i.Category,
+			&i.ConfidenceTier,
+			&i.ConfidenceScore,
+			&i.Severity,
+			&i.Title,
+			&i.Body,
+			&i.Suggestion,
+			&i.LocationHash,
+			&i.ContentHash,
+			&i.HeadSha,
+			&i.PostedAt,
+			&i.GithubCommentID,
+			&i.AddressedInNextCommit,
+			&i.SuppressionReason,
+			&i.DismissedAt,
+			&i.DismissedBy,
+			&i.ModelID,
+			&i.PromptTokens,
+			&i.CompletionTokens,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnpostedFindings = `-- name: ListUnpostedFindings :many
+SELECT id, review_task_id, pull_request_id, pipeline_run_id,
+       file_path, start_line, end_line, symbol,
+       category, confidence_tier, confidence_score, severity,
+       title, body, suggestion,
+       location_hash, content_hash, head_sha,
+       posted_at, github_comment_id, addressed_in_next_commit,
+       suppression_reason, dismissed_at, dismissed_by,
+       model_id, prompt_tokens, completion_tokens, metadata,
+       created_at, updated_at
+FROM findings
+WHERE pull_request_id = $1
+  AND posted_at IS NULL
+  AND suppression_reason IS NULL
+ORDER BY confidence_score DESC
+`
+
+func (q *Queries) ListUnpostedFindings(ctx context.Context, pullRequestID uuid.UUID) ([]Finding, error) {
+	rows, err := q.db.Query(ctx, listUnpostedFindings, pullRequestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Finding{}
+	for rows.Next() {
+		var i Finding
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReviewTaskID,
+			&i.PullRequestID,
+			&i.PipelineRunID,
+			&i.FilePath,
+			&i.StartLine,
+			&i.EndLine,
+			&i.Symbol,
+			&i.Category,
+			&i.ConfidenceTier,
+			&i.ConfidenceScore,
+			&i.Severity,
+			&i.Title,
+			&i.Body,
+			&i.Suggestion,
+			&i.LocationHash,
+			&i.ContentHash,
+			&i.HeadSha,
+			&i.PostedAt,
+			&i.GithubCommentID,
+			&i.AddressedInNextCommit,
+			&i.SuppressionReason,
 			&i.DismissedAt,
 			&i.DismissedBy,
 			&i.ModelID,
