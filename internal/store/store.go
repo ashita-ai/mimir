@@ -11,14 +11,17 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ashita-ai/mimir/internal/core"
 	"github.com/ashita-ai/mimir/internal/store/dbsqlc"
+	"github.com/ashita-ai/mimir/pkg/adapter"
 )
 
 // Store implements pkg/adapter.StoreAdapter against PostgreSQL.
@@ -39,6 +42,29 @@ func New(pool *pgxpool.Pool) *Store {
 // that need a raw pgxpool connection.
 func (s *Store) Pool() *pgxpool.Pool {
 	return s.pool
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+func (s *Store) WithTx(ctx context.Context, fn adapter.TxFunc) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	txStore := &Store{
+		pool: s.pool,
+		q:    s.q.WithTx(tx),
+	}
+
+	if err := fn(txStore, tx); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +117,7 @@ func (s *Store) GetPullRequest(ctx context.Context, id uuid.UUID) (*core.PullReq
 		BaseSHA:      row.BaseSha,
 		Author:       row.Author,
 		State:        core.PRState(row.State),
+		DeletedAt:    row.DeletedAt,
 		CreatedAt:    row.CreatedAt,
 		UpdatedAt:    row.UpdatedAt,
 	}
@@ -100,6 +127,106 @@ func (s *Store) GetPullRequest(ctx context.Context, id uuid.UUID) (*core.PullReq
 	}
 
 	return pr, nil
+}
+
+func (s *Store) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) error {
+	n, err := s.q.SoftDeletePullRequest(ctx, id)
+	if err != nil {
+		return fmt.Errorf("store: soft delete pull request %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: pull request %s not found or already deleted", id)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// PipelineRuns
+// ---------------------------------------------------------------------------
+
+func (s *Store) CreatePipelineRun(ctx context.Context, run *core.PipelineRun) error {
+	if run.ID == uuid.Nil {
+		run.ID = uuid.New()
+	}
+	if run.Status == "" {
+		run.Status = core.PipelineRunStatusRunning
+	}
+
+	metadataJSON, err := json.Marshal(run.Metadata)
+	if err != nil {
+		return fmt.Errorf("store: marshal pipeline run metadata: %w", err)
+	}
+
+	result, err := s.q.CreatePipelineRun(ctx, dbsqlc.CreatePipelineRunParams{
+		ID:            run.ID,
+		PullRequestID: run.PullRequestID,
+		HeadSha:       run.HeadSHA,
+		Status:        string(run.Status),
+		PromptVersion: run.PromptVersion,
+		ConfigHash:    run.ConfigHash,
+		Metadata:      metadataJSON,
+	})
+	if err != nil {
+		return fmt.Errorf("store: create pipeline run: %w", err)
+	}
+
+	run.CreatedAt = result.CreatedAt
+	run.UpdatedAt = result.UpdatedAt
+	return nil
+}
+
+func (s *Store) CompletePipelineRun(ctx context.Context, id uuid.UUID, status core.PipelineRunStatus, taskCount, findingCount int, errMsg *string) error {
+	n, err := s.q.CompletePipelineRun(ctx, dbsqlc.CompletePipelineRunParams{
+		ID:           id,
+		Status:       string(status),
+		TaskCount:    int32(taskCount),
+		FindingCount: int32(findingCount),
+		Error:        textFromStringPtr(errMsg),
+	})
+	if err != nil {
+		return fmt.Errorf("store: complete pipeline run %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: pipeline run %s not found", id)
+	}
+	return nil
+}
+
+func (s *Store) GetPipelineRun(ctx context.Context, id uuid.UUID) (*core.PipelineRun, error) {
+	row, err := s.q.GetPipelineRun(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("store: get pipeline run %s: %w", id, err)
+	}
+	run, err := pipelineRunFromRow(row)
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
+func (s *Store) ListPipelineRunsForPR(ctx context.Context, pullRequestID uuid.UUID) ([]core.PipelineRun, error) {
+	rows, err := s.q.ListPipelineRunsForPR(ctx, pullRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list pipeline runs for PR %s: %w", pullRequestID, err)
+	}
+
+	runs := make([]core.PipelineRun, len(rows))
+	for i, row := range rows {
+		run, err := pipelineRunFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("store: convert pipeline run row %d: %w", i, err)
+		}
+		runs[i] = run
+	}
+	return runs, nil
+}
+
+func (s *Store) ReconcileStalePipelineRuns(ctx context.Context) (int64, error) {
+	n, err := s.q.ReconcileStalePipelineRuns(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("store: reconcile stale pipeline runs: %w", err)
+	}
+	return n, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -117,10 +244,13 @@ func (s *Store) CreateReviewTask(ctx context.Context, task *core.ReviewTask) err
 	createdAt, err := s.q.CreateReviewTask(ctx, dbsqlc.CreateReviewTaskParams{
 		ID:            task.ID,
 		PullRequestID: task.PullRequestID,
+		PipelineRunID: task.PipelineRunID,
 		TaskType:      string(task.TaskType),
 		FilePath:      task.FilePath,
 		Symbol:        textFromString(task.Symbol),
 		RiskScore:     float64(task.RiskScore),
+		ModelID:       task.ModelID,
+		DiffHunk:      textFromString(task.DiffHunk),
 		Status:        string(task.Status),
 	})
 	if err != nil {
@@ -196,6 +326,7 @@ func (s *Store) CreateFinding(ctx context.Context, f *core.Finding) error {
 		ID:               f.ID,
 		ReviewTaskID:     f.ReviewTaskID,
 		PullRequestID:    f.PullRequestID,
+		PipelineRunID:    f.PipelineRunID,
 		FilePath:         f.FilePath,
 		StartLine:        int4FromIntPtr(f.StartLine),
 		EndLine:          int4FromIntPtr(f.EndLine),
@@ -209,6 +340,7 @@ func (s *Store) CreateFinding(ctx context.Context, f *core.Finding) error {
 		Suggestion:       textFromString(f.Suggestion),
 		LocationHash:     f.LocationHash,
 		ContentHash:      textFromString(f.ContentHash),
+		HeadSha:          f.HeadSHA,
 		ModelID:          f.ModelID,
 		PromptTokens:     int4FromIntPtr(f.PromptTokens),
 		CompletionTokens: int4FromIntPtr(f.CompletionTokens),
@@ -228,16 +360,41 @@ func (s *Store) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID) 
 	if err != nil {
 		return nil, fmt.Errorf("store: list findings for PR %s: %w", pullRequestID, err)
 	}
+	return findingsFromRows(rows)
+}
 
-	findings := make([]core.Finding, len(rows))
-	for i, row := range rows {
-		f, err := findingFromRow(row)
-		if err != nil {
-			return nil, fmt.Errorf("store: convert finding row %d: %w", i, err)
+func (s *Store) FindPriorFinding(ctx context.Context, locationHash, repoFullName string) (*core.Finding, error) {
+	row, err := s.q.FindPriorFinding(ctx, dbsqlc.FindPriorFindingParams{
+		LocationHash: locationHash,
+		RepoFullName: repoFullName,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
 		}
-		findings[i] = f
+		return nil, fmt.Errorf("store: find prior finding: %w", err)
 	}
-	return findings, nil
+	f, err := findingFromRow(row)
+	if err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+func (s *Store) ListUnaddressedFindings(ctx context.Context, pullRequestID uuid.UUID) ([]core.Finding, error) {
+	rows, err := s.q.ListUnaddressedFindings(ctx, pullRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list unaddressed findings for PR %s: %w", pullRequestID, err)
+	}
+	return findingsFromRows(rows)
+}
+
+func (s *Store) ListUnpostedFindings(ctx context.Context, pullRequestID uuid.UUID) ([]core.Finding, error) {
+	rows, err := s.q.ListUnpostedFindings(ctx, pullRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list unposted findings for PR %s: %w", pullRequestID, err)
+	}
+	return findingsFromRows(rows)
 }
 
 func (s *Store) MarkFindingPosted(ctx context.Context, id uuid.UUID, commentID int64) error {
@@ -265,6 +422,10 @@ func (s *Store) MarkFindingAddressed(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// Dismissed Fingerprints
+// ---------------------------------------------------------------------------
+
 func (s *Store) IsFingerprintDismissed(ctx context.Context, locationHash, repoFullName string) (bool, error) {
 	dismissed, err := s.q.IsFingerprintDismissed(ctx, dbsqlc.IsFingerprintDismissedParams{
 		Fingerprint:  locationHash,
@@ -274,6 +435,63 @@ func (s *Store) IsFingerprintDismissed(ctx context.Context, locationHash, repoFu
 		return false, fmt.Errorf("store: check dismissed fingerprint: %w", err)
 	}
 	return dismissed, nil
+}
+
+func (s *Store) DismissFingerprint(ctx context.Context, fingerprint, repoFullName, dismissedBy, reason string) error {
+	return s.q.DismissFingerprint(ctx, dbsqlc.DismissFingerprintParams{
+		Fingerprint:  fingerprint,
+		RepoFullName: repoFullName,
+		DismissedBy:  dismissedBy,
+		Reason:       textFromString(reason),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Finding Events
+// ---------------------------------------------------------------------------
+
+func (s *Store) CreateFindingEvent(ctx context.Context, event *core.FindingEvent) error {
+	if event.ID == uuid.Nil {
+		event.ID = uuid.New()
+	}
+
+	metadataJSON, err := json.Marshal(event.Metadata)
+	if err != nil {
+		return fmt.Errorf("store: marshal finding event metadata: %w", err)
+	}
+
+	createdAt, err := s.q.CreateFindingEvent(ctx, dbsqlc.CreateFindingEventParams{
+		ID:        event.ID,
+		FindingID: event.FindingID,
+		EventType: event.EventType,
+		Actor:     event.Actor,
+		OldValue:  textFromString(event.OldValue),
+		NewValue:  textFromString(event.NewValue),
+		Metadata:  metadataJSON,
+	})
+	if err != nil {
+		return fmt.Errorf("store: create finding event: %w", err)
+	}
+
+	event.CreatedAt = createdAt
+	return nil
+}
+
+func (s *Store) ListEventsForFinding(ctx context.Context, findingID uuid.UUID) ([]core.FindingEvent, error) {
+	rows, err := s.q.ListEventsForFinding(ctx, findingID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list events for finding %s: %w", findingID, err)
+	}
+
+	events := make([]core.FindingEvent, len(rows))
+	for i, row := range rows {
+		event, err := findingEventFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("store: convert finding event row %d: %w", i, err)
+		}
+		events[i] = event
+	}
+	return events, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -335,10 +553,13 @@ func reviewTaskFromRow(row dbsqlc.ReviewTask) core.ReviewTask {
 	return core.ReviewTask{
 		ID:            row.ID,
 		PullRequestID: row.PullRequestID,
+		PipelineRunID: row.PipelineRunID,
 		TaskType:      core.TaskType(row.TaskType),
 		FilePath:      row.FilePath,
 		Symbol:        stringFromText(row.Symbol),
 		RiskScore:     core.RiskScore(row.RiskScore),
+		ModelID:       row.ModelID,
+		DiffHunk:      stringFromText(row.DiffHunk),
 		Status:        core.TaskStatus(row.Status),
 		Error:         stringPtrFromText(row.Error),
 		StartedAt:     row.StartedAt,
@@ -353,6 +574,7 @@ func findingFromRow(row dbsqlc.Finding) (core.Finding, error) {
 		ID:                    row.ID,
 		ReviewTaskID:          row.ReviewTaskID,
 		PullRequestID:         row.PullRequestID,
+		PipelineRunID:         row.PipelineRunID,
 		FilePath:              row.FilePath,
 		StartLine:             intPtrFromInt4(row.StartLine),
 		EndLine:               intPtrFromInt4(row.EndLine),
@@ -366,9 +588,11 @@ func findingFromRow(row dbsqlc.Finding) (core.Finding, error) {
 		Suggestion:            stringFromText(row.Suggestion),
 		LocationHash:          row.LocationHash,
 		ContentHash:           stringFromText(row.ContentHash),
+		HeadSHA:               row.HeadSha,
 		PostedAt:              row.PostedAt,
 		GitHubCommentID:       int64PtrFromInt8(row.GithubCommentID),
 		AddressedInNextCommit: row.AddressedInNextCommit,
+		SuppressionReason:     stringFromText(row.SuppressionReason),
 		DismissedAt:           row.DismissedAt,
 		DismissedBy:           stringFromText(row.DismissedBy),
 		ModelID:               row.ModelID,
@@ -385,4 +609,65 @@ func findingFromRow(row dbsqlc.Finding) (core.Finding, error) {
 	}
 
 	return f, nil
+}
+
+// findingsFromRows converts a slice of sqlc Finding rows to core.Finding slice.
+func findingsFromRows(rows []dbsqlc.Finding) ([]core.Finding, error) {
+	findings := make([]core.Finding, len(rows))
+	for i, row := range rows {
+		f, err := findingFromRow(row)
+		if err != nil {
+			return nil, fmt.Errorf("store: convert finding row %d: %w", i, err)
+		}
+		findings[i] = f
+	}
+	return findings, nil
+}
+
+// pipelineRunFromRow converts a sqlc-generated PipelineRun to a core.PipelineRun.
+func pipelineRunFromRow(row dbsqlc.PipelineRun) (core.PipelineRun, error) {
+	run := core.PipelineRun{
+		ID:            row.ID,
+		PullRequestID: row.PullRequestID,
+		HeadSHA:       row.HeadSha,
+		Status:        core.PipelineRunStatus(row.Status),
+		PromptVersion: row.PromptVersion,
+		ConfigHash:    row.ConfigHash,
+		TaskCount:     int(row.TaskCount),
+		FindingCount:  int(row.FindingCount),
+		Error:         stringPtrFromText(row.Error),
+		StartedAt:     row.StartedAt,
+		CompletedAt:   row.CompletedAt,
+		CreatedAt:     row.CreatedAt,
+		UpdatedAt:     row.UpdatedAt,
+	}
+
+	if row.Metadata != nil {
+		if err := json.Unmarshal(row.Metadata, &run.Metadata); err != nil {
+			return core.PipelineRun{}, fmt.Errorf("unmarshal pipeline run metadata: %w", err)
+		}
+	}
+
+	return run, nil
+}
+
+// findingEventFromRow converts a sqlc-generated FindingEvent to a core.FindingEvent.
+func findingEventFromRow(row dbsqlc.FindingEvent) (core.FindingEvent, error) {
+	event := core.FindingEvent{
+		ID:        row.ID,
+		FindingID: row.FindingID,
+		EventType: row.EventType,
+		Actor:     row.Actor,
+		OldValue:  stringFromText(row.OldValue),
+		NewValue:  stringFromText(row.NewValue),
+		CreatedAt: row.CreatedAt,
+	}
+
+	if row.Metadata != nil {
+		if err := json.Unmarshal(row.Metadata, &event.Metadata); err != nil {
+			return core.FindingEvent{}, fmt.Errorf("unmarshal finding event metadata: %w", err)
+		}
+	}
+
+	return event, nil
 }

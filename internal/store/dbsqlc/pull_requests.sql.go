@@ -16,7 +16,7 @@ import (
 const getPullRequest = `-- name: GetPullRequest :one
 SELECT id, github_pr_id, repo_full_name, pr_number,
        head_sha, base_sha, author, state, metadata,
-       created_at, updated_at
+       deleted_at, created_at, updated_at
 FROM pull_requests
 WHERE id = $1
 `
@@ -34,10 +34,25 @@ func (q *Queries) GetPullRequest(ctx context.Context, id uuid.UUID) (PullRequest
 		&i.Author,
 		&i.State,
 		&i.Metadata,
+		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const softDeletePullRequest = `-- name: SoftDeletePullRequest :execrows
+UPDATE pull_requests
+SET deleted_at = now()
+WHERE id = $1 AND deleted_at IS NULL
+`
+
+func (q *Queries) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, softDeletePullRequest, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertPullRequest = `-- name: UpsertPullRequest :one

@@ -15,18 +15,22 @@ import (
 
 const createReviewTask = `-- name: CreateReviewTask :one
 INSERT INTO review_tasks (
-    id, pull_request_id, task_type, file_path, symbol, risk_score, status
-) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    id, pull_request_id, pipeline_run_id, task_type,
+    file_path, symbol, risk_score, model_id, diff_hunk, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING created_at
 `
 
 type CreateReviewTaskParams struct {
 	ID            uuid.UUID   `json:"id"`
 	PullRequestID uuid.UUID   `json:"pull_request_id"`
+	PipelineRunID uuid.UUID   `json:"pipeline_run_id"`
 	TaskType      string      `json:"task_type"`
 	FilePath      string      `json:"file_path"`
 	Symbol        pgtype.Text `json:"symbol"`
 	RiskScore     float64     `json:"risk_score"`
+	ModelID       string      `json:"model_id"`
+	DiffHunk      pgtype.Text `json:"diff_hunk"`
 	Status        string      `json:"status"`
 }
 
@@ -34,10 +38,13 @@ func (q *Queries) CreateReviewTask(ctx context.Context, arg CreateReviewTaskPara
 	row := q.db.QueryRow(ctx, createReviewTask,
 		arg.ID,
 		arg.PullRequestID,
+		arg.PipelineRunID,
 		arg.TaskType,
 		arg.FilePath,
 		arg.Symbol,
 		arg.RiskScore,
+		arg.ModelID,
+		arg.DiffHunk,
 		arg.Status,
 	)
 	var created_at time.Time
@@ -46,8 +53,9 @@ func (q *Queries) CreateReviewTask(ctx context.Context, arg CreateReviewTaskPara
 }
 
 const listPendingReviewTasks = `-- name: ListPendingReviewTasks :many
-SELECT id, pull_request_id, task_type, file_path, symbol,
-       risk_score, status, error, started_at, completed_at, created_at
+SELECT id, pull_request_id, pipeline_run_id, task_type,
+       file_path, symbol, risk_score, model_id, diff_hunk,
+       status, error, started_at, completed_at, created_at
 FROM review_tasks
 WHERE status = 'pending'
 ORDER BY risk_score DESC
@@ -65,10 +73,13 @@ func (q *Queries) ListPendingReviewTasks(ctx context.Context) ([]ReviewTask, err
 		if err := rows.Scan(
 			&i.ID,
 			&i.PullRequestID,
+			&i.PipelineRunID,
 			&i.TaskType,
 			&i.FilePath,
 			&i.Symbol,
 			&i.RiskScore,
+			&i.ModelID,
+			&i.DiffHunk,
 			&i.Status,
 			&i.Error,
 			&i.StartedAt,

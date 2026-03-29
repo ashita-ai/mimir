@@ -70,9 +70,11 @@ static analysis pipelines to produce high-signal, low-noise code review findings
 
 func newServeCmd(log *zap.Logger) *cobra.Command {
 	var (
-		addr       string
-		workers    int
-		enableHTTP bool
+		listenAddr    string
+		workers       int
+		enableHTTP    bool
+		maxConcurrent int
+		taskTimeout   time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -128,7 +130,11 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 				if err := riverClient.Start(ctx); err != nil {
 					return fmt.Errorf("start river client: %w", err)
 				}
-				log.Info("river workers started", zap.Int("workers", workers))
+				log.Info("river workers started",
+					zap.Int("workers", workers),
+					zap.Int("max_concurrent_tasks", maxConcurrent),
+					zap.Duration("task_timeout", taskTimeout),
+				)
 			} else {
 				log.Info("workers disabled (--workers=0), HTTP-only mode")
 			}
@@ -174,7 +180,7 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 				})
 
 				srv = &http.Server{
-					Addr:         addr,
+					Addr:         listenAddr,
 					Handler:      r,
 					ReadTimeout:  10 * time.Second,
 					WriteTimeout: 30 * time.Second,
@@ -182,7 +188,7 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 				}
 
 				go func() {
-					log.Info("HTTP server listening", zap.String("addr", addr))
+					log.Info("HTTP server listening", zap.String("addr", listenAddr))
 					if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 						errCh <- err
 					}
@@ -229,9 +235,11 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 		},
 	}
 
-	cmd.Flags().StringVar(&addr, "addr", ":8080", "HTTP listen address")
-	cmd.Flags().IntVar(&workers, "workers", 4, "number of river worker goroutines")
+	cmd.Flags().StringVar(&listenAddr, "listen-addr", ":8080", "HTTP listen address")
+	cmd.Flags().IntVar(&workers, "workers", 5, "number of river worker goroutines")
 	cmd.Flags().BoolVar(&enableHTTP, "http", true, "enable HTTP webhook receiver (set false for worker-only mode)")
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", 10, "maximum concurrent review tasks per job (errgroup limit)")
+	cmd.Flags().DurationVar(&taskTimeout, "task-timeout", 60*time.Second, "per-task timeout for LLM inference")
 
 	return cmd
 }

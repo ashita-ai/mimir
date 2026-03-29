@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ashita-ai/mimir/internal/core"
 )
@@ -24,7 +25,7 @@ type ProviderAdapter interface {
 	// Returns the platform's comment ID for tracking.
 	PostComment(ctx context.Context, req PostCommentRequest) (int64, error)
 
-	// PostSummaryComment posts a top-level PR comment (not inline).
+	// PostSummaryComment posts or updates a top-level PR comment (not inline).
 	// Returns the platform's comment ID.
 	PostSummaryComment(ctx context.Context, repoFullName string, prNumber int, body string) (int64, error)
 }
@@ -79,6 +80,11 @@ type StaticToolAdapter interface {
 
 // IndexAdapter builds and queries the semantic repo map for a review run.
 type IndexAdapter interface {
+	// BuildSymbolTable runs the change cone algorithm (ADR-0004): parses changed
+	// files, finds importers, extracts references, and builds the per-run symbol table.
+	// Called once per pipeline run; the returned SymbolTable is passed to Query calls.
+	BuildSymbolTable(ctx context.Context, repoPath, baseSHA, headSHA string) (*core.SymbolTable, error)
+
 	// Query returns context slices for a review task, respecting the token budget.
 	Query(ctx context.Context, req IndexRequest) ([]core.Slice, error)
 
@@ -125,14 +131,52 @@ type PolicyAdapter interface {
 // StoreAdapter — persistence (PostgreSQL only, ADR-0002)
 // ---------------------------------------------------------------------------
 
+// TxFunc is a callback that receives a transaction-scoped StoreAdapter and
+// the raw pgx.Tx for components (e.g. River) that need direct tx access.
+type TxFunc func(txStore StoreAdapter, tx pgx.Tx) error
+
 // StoreAdapter is the persistence boundary for all domain objects.
 type StoreAdapter interface {
+	// --- Transactions ---
+
+	// WithTx runs fn inside a database transaction. The txStore argument
+	// passed to fn is bound to the transaction. If fn returns an error,
+	// the transaction is rolled back; otherwise it is committed.
+	// The raw pgx.Tx is exposed for components like River that need it.
+	WithTx(ctx context.Context, fn TxFunc) error
+
+	// --- Pull Requests ---
+
 	// UpsertPullRequest creates or updates a PR record. Upsert key is
 	// (github_pr_id, head_sha).
 	UpsertPullRequest(ctx context.Context, pr *core.PullRequest) error
 
 	// GetPullRequest retrieves a PR by its internal UUID.
 	GetPullRequest(ctx context.Context, id uuid.UUID) (*core.PullRequest, error)
+
+	// SoftDeletePullRequest sets deleted_at on a PR record.
+	SoftDeletePullRequest(ctx context.Context, id uuid.UUID) error
+
+	// --- Pipeline Runs ---
+
+	// CreatePipelineRun inserts a new pipeline run record.
+	CreatePipelineRun(ctx context.Context, run *core.PipelineRun) error
+
+	// CompletePipelineRun marks a pipeline run as completed or failed,
+	// recording final task/finding counts and optional error.
+	CompletePipelineRun(ctx context.Context, id uuid.UUID, status core.PipelineRunStatus, taskCount, findingCount int, errMsg *string) error
+
+	// GetPipelineRun retrieves a pipeline run by its internal UUID.
+	GetPipelineRun(ctx context.Context, id uuid.UUID) (*core.PipelineRun, error)
+
+	// ListPipelineRunsForPR returns all pipeline runs for a given pull request.
+	ListPipelineRunsForPR(ctx context.Context, pullRequestID uuid.UUID) ([]core.PipelineRun, error)
+
+	// ReconcileStalePipelineRuns marks any runs still in 'running' status
+	// as 'failed'. Called at startup to clean up after crashes.
+	ReconcileStalePipelineRuns(ctx context.Context) (int64, error)
+
+	// --- Review Tasks ---
 
 	// CreateReviewTask inserts a new review task.
 	CreateReviewTask(ctx context.Context, task *core.ReviewTask) error
@@ -141,14 +185,31 @@ type StoreAdapter interface {
 	// records an error message (for failed tasks).
 	UpdateReviewTaskStatus(ctx context.Context, id uuid.UUID, status core.TaskStatus, errMsg *string) error
 
-	// ListPendingReviewTasks returns tasks with status = 'pending'.
+	// ListPendingReviewTasks returns tasks with status = 'pending',
+	// ordered by risk_score descending.
 	ListPendingReviewTasks(ctx context.Context) ([]core.ReviewTask, error)
 
-	// CreateFinding inserts a new finding.
+	// --- Findings ---
+
+	// CreateFinding inserts a new finding. Every finding is preserved
+	// (no upsert — append-only by design).
 	CreateFinding(ctx context.Context, f *core.Finding) error
 
-	// ListFindingsForPR returns all findings for a given pull request.
+	// ListFindingsForPR returns all findings for a given pull request,
+	// ordered by confidence descending, severity priority ascending.
 	ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID) ([]core.Finding, error)
+
+	// FindPriorFinding looks up a previous finding with the same location hash
+	// for the given repo. Used by policy for cross-run dedup.
+	FindPriorFinding(ctx context.Context, locationHash, repoFullName string) (*core.Finding, error)
+
+	// ListUnaddressedFindings returns posted findings that have not been
+	// addressed in a subsequent commit. Used by addressed-in-next-commit detection.
+	ListUnaddressedFindings(ctx context.Context, pullRequestID uuid.UUID) ([]core.Finding, error)
+
+	// ListUnpostedFindings returns findings that should have been posted
+	// but lack a posted_at timestamp. Used by the posting retry job.
+	ListUnpostedFindings(ctx context.Context, pullRequestID uuid.UUID) ([]core.Finding, error)
 
 	// MarkFindingPosted records the platform comment ID and timestamp
 	// after a finding is posted as a review comment.
@@ -157,7 +218,22 @@ type StoreAdapter interface {
 	// MarkFindingAddressed sets addressed_in_next_commit = true.
 	MarkFindingAddressed(ctx context.Context, id uuid.UUID) error
 
+	// --- Dismissed Fingerprints ---
+
 	// IsFingerprintDismissed checks whether a location hash has been
 	// permanently dismissed for the given repository.
 	IsFingerprintDismissed(ctx context.Context, locationHash, repoFullName string) (bool, error)
+
+	// DismissFingerprint records a permanent dismissal for a location hash
+	// in the given repository. Upserts to avoid duplicate key errors.
+	DismissFingerprint(ctx context.Context, fingerprint, repoFullName, dismissedBy, reason string) error
+
+	// --- Finding Events ---
+
+	// CreateFindingEvent inserts an append-only lifecycle event for a finding.
+	CreateFindingEvent(ctx context.Context, event *core.FindingEvent) error
+
+	// ListEventsForFinding returns all lifecycle events for a given finding,
+	// ordered by created_at ascending.
+	ListEventsForFinding(ctx context.Context, findingID uuid.UUID) ([]core.FindingEvent, error)
 }
