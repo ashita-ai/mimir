@@ -208,8 +208,9 @@ Required:
   --pr int         Pull request number
 
 Optional:
-  --format string  Output format: json, table (default "table")
-  --post           Post results to GitHub as comments (default false)
+  --format string      Output format: json, table (default "table")
+  --post               Post results to GitHub as comments (default false)
+  --show-suppressed    Include suppressed findings in output (default false)
 ```
 
 ### Table Output Format

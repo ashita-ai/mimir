@@ -58,7 +58,7 @@ Plus one of the following auth modes:
 
 | Env Var | Flag | Type | Default | Description |
 |---------|------|------|---------|-------------|
-| `MIMIR_MAX_INLINE_FINDINGS` | — | int | `7` | Max inline comments per PR |
+| `MIMIR_MAX_INLINE_FINDINGS` | — | int | `0` | Max inline comments per PR. 0 = no cap (all high-confidence findings post inline) |
 | `MIMIR_CONFIDENCE_THRESHOLD_HIGH` | — | float64 | `0.80` | Score threshold for high confidence tier |
 | `MIMIR_CONFIDENCE_THRESHOLD_MEDIUM` | — | float64 | `0.50` | Score threshold for medium confidence tier |
 

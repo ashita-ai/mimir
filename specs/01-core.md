@@ -21,7 +21,7 @@
 ```go
 type PullRequest struct {
     ID            uuid.UUID
-    GitHubPRID    int64
+    ExternalPRID  int64           // GitHub PR ID, GitLab MR IID, etc.
     RepoFullName  string          // "owner/repo"
     PRNumber      int
     HeadSHA       string
@@ -125,7 +125,7 @@ type Finding struct {
 
     // Lifecycle
     PostedAt        *time.Time
-    GitHubCommentID *int64
+    ExternalCommentID *int64        // GitHub comment ID, GitLab note ID, etc.
     AddressedStatus AddressedStatus // unaddressed | likely_addressed | confirmed
     SuppressionReason *string       // nil if not suppressed; "duplicate", "low_confidence", "dismissed_fingerprint"
     DismissedAt     *time.Time
@@ -203,13 +203,14 @@ type SymbolTable struct {
 }
 
 type Symbol struct {
-    Name      string
-    Kind      SymbolKind // func | method | type | interface
-    FilePath  string
-    StartLine int
-    EndLine   int
-    Package   string     // resolved package path
-    Exported  bool       // starts with uppercase (Go), exported keyword, etc.
+    Name           string
+    Kind           SymbolKind // func | method | type | interface
+    FilePath       string
+    StartLine      int
+    EndLine        int
+    Package        string     // resolved package path
+    Exported       bool       // starts with uppercase (Go), exported keyword, etc.
+    ParameterCount int        // number of parameters (funcs/methods only; 0 for types)
 }
 
 type SymbolKind string

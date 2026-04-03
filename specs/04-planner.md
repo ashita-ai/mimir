@@ -155,9 +155,9 @@ func assignTaskTypes(sym core.Symbol, filePath string) []core.TaskType {
         types = append(types, core.TaskTypeTestCoverage)
     }
 
-    // Style: only for large functions or functions with many parameters
-    // (style review of small functions is not worth the model call)
-    if sym.EndLine-sym.StartLine > 30 {
+    // Style: for large functions, functions with many parameters, or high complexity.
+    // Style review of small, simple functions is not worth the model call.
+    if sym.EndLine-sym.StartLine > 30 || sym.ParameterCount > 5 {
         types = append(types, core.TaskTypeStyle)
     }
 
@@ -204,6 +204,9 @@ The resolved `ModelID` is stored on the `ReviewTask` so the runtime knows which 
 On a `synchronize` event (new push to existing PR), the planner checks for prior tasks:
 
 ```sql
+-- Only consider findings from completed tasks. Failed tasks may have produced
+-- partial or no findings, so their absence should not suppress a re-review.
+-- A task that failed on the previous push should be retried on the next push.
 SELECT f.location_hash, f.content_hash
 FROM review_tasks rt
 JOIN findings f ON f.review_task_id = rt.id
@@ -211,7 +214,7 @@ WHERE rt.pull_request_id = $1
   AND rt.status = 'completed'
 ```
 
-For each candidate task: if a prior task exists with the same `location_hash` AND the `content_hash` of the underlying code is unchanged, skip the task. The prior findings are still valid.
+For each candidate task: if a prior *completed* task exists with the same `location_hash` AND the `content_hash` of the underlying code is unchanged, skip the task. The prior findings are still valid. Failed tasks are always retried — their findings (if any) are not reliable enough for dedup.
 
 This prevents re-reviewing unchanged functions on each push. Only new or modified symbols get new tasks.
 

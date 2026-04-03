@@ -46,7 +46,7 @@ Authorization: Bearer {jwt}
 → { "id": 12345, ... }
 ```
 
-Cache the `(repo_full_name → installation_id)` mapping in memory. Repos don't change installations often.
+Cache the `(repo_full_name → installation_id)` mapping in memory with a 1-hour TTL. Repos rarely change installations, but when they do (e.g., app is uninstalled and reinstalled, or repo is transferred to a different org), stale cache entries produce 401 errors. On any 401 from an installation token request, evict the cached entry, re-resolve, and retry once. If the retry also fails, the job fails with an auth error (non-retryable).
 
 ### PAT Fallback
 
@@ -102,7 +102,7 @@ This runs as chi middleware, before the handler parses the body. Failed verifica
 
 Within a single database transaction:
 
-1. Upsert `pull_requests` row (keyed on `github_pr_id + head_sha`)
+1. Upsert `pull_requests` row (keyed on `external_pr_id + head_sha`)
 2. Insert River `ReviewPipelineJob` with the PR ID as payload
 3. Commit
 
@@ -124,6 +124,7 @@ Called inside the River job handler, not in the webhook handler. The webhook onl
 
 ```
 1. GET /repos/{owner}/{repo}/pulls/{number}
+   Accept: application/json (default)
    → PR metadata (title, author, state, head/base SHAs)
 
 2. GET /repos/{owner}/{repo}/pulls/{number}
@@ -133,6 +134,8 @@ Called inside the River job handler, not in the webhook handler. The webhook onl
 3. GET /repos/{owner}/{repo}/pulls/{number}/files?per_page=100
    → File list with status (added/modified/removed), paginate if > 100 files
 ```
+
+**Note:** Calls 1 and 2 hit the same endpoint but with different `Accept` headers, yielding different response formats (JSON metadata vs. plain text diff). These are two separate HTTP requests — GitHub does not support returning both in one call.
 
 ### Large Diff Handling
 
@@ -200,7 +203,7 @@ GitHub renders this as a "suggested change" that the author can apply with one c
 
 ### Idempotency
 
-Before posting, query `findings` for this `location_hash + pull_request_id`. If `github_comment_id` is already set, skip. This prevents duplicate comments on River job retries.
+Before posting, query `findings` for this `location_hash + pull_request_id`. If `external_comment_id` is already set, skip. This prevents duplicate comments on River job retries.
 
 ### Return Value
 
@@ -252,21 +255,35 @@ Collects eval signal from GitHub reactions on Mimir's inline comments.
 
 A periodic River job (`ReactionPollJob`) runs every 15 minutes:
 
-1. Query `findings` where `github_comment_id IS NOT NULL` and `posted_at > now() - interval '7 days'`
+1. Query `findings` where `external_comment_id IS NOT NULL` and `posted_at > now() - interval '7 days'`
 2. For each finding, check reactions:
    ```
    GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions
    ```
-3. Write new reactions to `finding_events`:
+3. Write new reactions to `finding_events` via the canonical `CreateFindingEvent` query (Spec 07):
    ```sql
-   INSERT INTO finding_events (finding_id, event_type, actor, created_at)
-   VALUES ($1, 'thumbs_up', $2, $3)
-   ON CONFLICT DO NOTHING;
+   INSERT INTO finding_events (finding_id, event_type, actor, old_value, new_value, metadata)
+   VALUES ($1, 'thumbs_up', $2, $3, $4, $5)
+   ON CONFLICT (finding_id, event_type, actor)
+       WHERE event_type IN ('thumbs_up', 'thumbs_down')
+       DO NOTHING;
    ```
 
 ### Rate Limit Awareness
 
 This job makes one API call per recently-posted finding. For a team generating ~50 findings/day, that's ~50 calls per 15-minute cycle — well within GitHub's rate limits. If `X-RateLimit-Remaining` drops below 100, pause and resume on the next cycle.
+
+### Rate-Limit Partial Review Notification
+
+When the posting loop hits a rate limit and stops early (see Spec 06 posting flow), the summary comment is still posted (or updated) to notify the user that the review was partial:
+
+```markdown
+**Note:** This review was interrupted by a GitHub API rate limit. {posted_count}/{total_count}
+findings were posted inline. The remaining findings will be posted automatically when the
+rate limit resets. Check back shortly.
+```
+
+The summary comment is always the last thing posted. If even the summary comment fails due to rate limiting, the `PostingRetryJob` will post it on its next cycle.
 
 ---
 

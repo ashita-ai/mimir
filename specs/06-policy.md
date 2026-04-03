@@ -4,7 +4,7 @@
 > **Date:** 2026-03-27
 > **Package:** `internal/policy`
 > **Implements:** `pkg/adapter.PolicyAdapter`
-> **ADR:** [0005-service-architecture.md](../adr/0005-service-architecture.md) (two-tier posting)
+> **ADR:** [0005-service-architecture.md](../adr/0005-service-architecture.md) (posting strategy — this spec supersedes ADR-0005's two-tier posting table; inline is now the primary channel for all non-suppressed findings)
 
 ---
 
@@ -154,17 +154,20 @@ func (p *DefaultPolicy) Triage(ctx context.Context, findings []core.Finding) (in
             continue
         }
 
-        // Step 3: Classify by tier
+        // Step 3: Classify by tier.
+        // High and medium confidence findings go inline — inline comments are
+        // far more actionable than summary table rows, and we want to surface
+        // all real findings in a single pass rather than forcing multiple
+        // review cycles. Escalated findings go inline regardless of confidence.
         switch {
         case p.shouldEscalate(*f):
-            // Escalated findings always go inline, regardless of confidence
             candidates = append(candidates, *f)
 
         case f.ConfidenceTier == core.ConfidenceHigh:
             candidates = append(candidates, *f)
 
         case f.ConfidenceTier == core.ConfidenceMedium:
-            summaryFindings = append(summaryFindings, *f)
+            candidates = append(candidates, *f)
 
         default: // low confidence
             reason := "low_confidence"
@@ -173,31 +176,29 @@ func (p *DefaultPolicy) Triage(ctx context.Context, findings []core.Finding) (in
         }
     }
 
-    // Step 4: Enforce inline cap.
-    // IMPORTANT: enforceInlineCap sorts candidates in-place. The overflow
-    // slice (candidates[cap:]) depends on this sort having already happened,
-    // so that overflow contains the lowest-priority findings.
-    inline = enforceInlineCap(candidates, p.maxFindingsPerPR)
-    if len(candidates) > p.maxFindingsPerPR {
+    // Step 4: Sort candidates by priority for deterministic output.
+    // All high-confidence and escalated findings are posted inline — no cap.
+    // Surfacing all findings in one pass is better than forcing multiple
+    // review cycles. Teams that want a cap can set MIMIR_MAX_INLINE_FINDINGS.
+    sortByPriority(candidates)
+    if p.maxFindingsPerPR > 0 && len(candidates) > p.maxFindingsPerPR {
+        inline = candidates[:p.maxFindingsPerPR]
         overflow := candidates[p.maxFindingsPerPR:]
         summaryFindings = append(overflow, summaryFindings...)
+    } else {
+        inline = candidates
     }
 
     return inline, summaryFindings, suppressedFindings
 }
 ```
 
-### Inline Cap Enforcement
+### Priority Sorting
 
 ```go
-// enforceInlineCap sorts candidates in-place by priority and returns the top `cap` entries.
-// SIDE EFFECT: mutates the order of the candidates slice. The caller relies on this
-// mutation to correctly identify overflow findings (candidates[cap:]).
-func enforceInlineCap(candidates []core.Finding, cap int) []core.Finding {
-    if len(candidates) <= cap {
-        return candidates
-    }
-
+// sortByPriority sorts findings in-place by priority for deterministic output.
+// Used both for inline ordering and optional cap enforcement.
+func sortByPriority(candidates []core.Finding) {
     // Sort by: escalated first, then by severity (critical > high > medium > low > info),
     // then by confidence score descending
     sort.Slice(candidates, func(i, j int) bool {
@@ -211,7 +212,6 @@ func enforceInlineCap(candidates []core.Finding, cap int) []core.Finding {
         return a.ConfidenceScore > b.ConfidenceScore
     })
 
-    return candidates[:cap]
 }
 
 func severityRank(s core.Severity) int {
@@ -239,7 +239,7 @@ func (p *DefaultPolicy) shouldEscalate(f core.Finding) bool {
 }
 ```
 
-Default `maxFindingsPerPR`: 7. Configurable.
+Default `maxFindingsPerPR`: 0 (no cap — all high-confidence findings post inline). Configurable via `MIMIR_MAX_INLINE_FINDINGS`. Set to a positive integer to enforce a cap; overflow goes to the summary comment.
 
 ---
 
@@ -317,15 +317,10 @@ This ensures no finding is silently lost between persist and post. The `ListUnpo
 
 **Coverage:** {reviewed_count}/{total_count} functions reviewed{failed_disclaimer}
 
-### Inline Findings ({inline_count})
-| File | Line | Category | Severity | Title |
-|------|------|----------|----------|-------|
-{for each inline finding: | {file} | {line} | {category} | {severity} | {title} |}
-
-### Additional Findings ({summary_count})
-| File | Symbol | Category | Confidence | Severity | Title |
-|------|--------|----------|------------|----------|-------|
-{for each summary finding: | {file} | {symbol} | {category} | {tier} | {severity} | {title} |}
+### Findings ({inline_count})
+| File | Line | Category | Severity | Confidence | Title |
+|------|------|----------|----------|------------|-------|
+{for each inline finding: | {file} | {line} | {category} | {severity} | {tier} | {title} |}
 
 {if failed_tasks:}
 ### Incomplete
@@ -335,6 +330,15 @@ This ensures no finding is silently lost between persist and post. The `ListUnpo
 {end}
 
 ---
+{if suppressed_count > 0:}
+### Suppressed Findings ({suppressed_count})
+| Reason | Count | Details |
+|--------|-------|---------|
+{for each suppression_reason group: | {reason} | {count} | {explanation} |}
+
+*Suppressed findings are recorded in Mimir's database. Use `mimir review --show-suppressed` to inspect them.*
+{end}
+
 {if approximate:}
 *Context: semantic index was heuristic for this review. Caller relationships are approximate.*
 {end}

@@ -26,7 +26,7 @@
 
 CREATE TABLE pull_requests (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    github_pr_id    BIGINT NOT NULL,
+    external_pr_id  BIGINT NOT NULL,     -- GitHub PR ID, GitLab MR IID, etc.
     repo_full_name  TEXT NOT NULL,
     pr_number       INT NOT NULL,
     head_sha        TEXT NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE pull_requests (
     deleted_at      TIMESTAMPTZ,          -- soft delete; NULL = active
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (github_pr_id, head_sha)
+    UNIQUE (external_pr_id, head_sha)
 );
 
 CREATE INDEX pull_requests_repo_pr_idx ON pull_requests (repo_full_name, pr_number);
@@ -127,7 +127,7 @@ CREATE TABLE findings (
 
     -- Lifecycle
     posted_at           TIMESTAMPTZ,
-    github_comment_id   BIGINT,
+    external_comment_id BIGINT,          -- GitHub comment ID, GitLab note ID, etc.
     addressed_status    TEXT NOT NULL DEFAULT 'unaddressed'
                         CHECK (addressed_status IN ('unaddressed', 'likely_addressed', 'confirmed')),
     suppression_reason  TEXT               -- NULL if not suppressed; otherwise: 'duplicate', 'low_confidence', 'dismissed_fingerprint'
@@ -249,9 +249,9 @@ internal/store/queries/
 **pull_requests.sql:**
 ```sql
 -- name: UpsertPullRequest :one
-INSERT INTO pull_requests (github_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata)
+INSERT INTO pull_requests (external_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (github_pr_id, head_sha) DO UPDATE
+ON CONFLICT (external_pr_id, head_sha) DO UPDATE
 SET state = EXCLUDED.state, metadata = EXCLUDED.metadata, updated_at = now()
 RETURNING *;
 
@@ -260,7 +260,7 @@ SELECT * FROM pull_requests WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: GetPullRequestByGitHubID :one
 SELECT * FROM pull_requests
-WHERE github_pr_id = $1 AND deleted_at IS NULL
+WHERE external_pr_id = $1 AND deleted_at IS NULL
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -348,13 +348,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 RETURNING *;
 
 -- name: ListFindingsForPR :many
-SELECT * FROM findings WHERE pull_request_id = $1 ORDER BY severity, confidence_score DESC;
+SELECT * FROM findings WHERE pull_request_id = $1
+ORDER BY CASE severity
+    WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3
+    WHEN 'low' THEN 4 WHEN 'info' THEN 5 END,
+    confidence_score DESC;
 
 -- name: ListFindingsForRun :many
-SELECT * FROM findings WHERE pipeline_run_id = $1 ORDER BY severity, confidence_score DESC;
+SELECT * FROM findings WHERE pipeline_run_id = $1
+ORDER BY CASE severity
+    WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3
+    WHEN 'low' THEN 4 WHEN 'info' THEN 5 END,
+    confidence_score DESC;
 
 -- name: MarkFindingPosted :exec
-UPDATE findings SET posted_at = now(), github_comment_id = $2, updated_at = now() WHERE id = $1;
+UPDATE findings SET posted_at = now(), external_comment_id = $2, updated_at = now() WHERE id = $1;
 
 -- name: MarkFindingAddressed :exec
 UPDATE findings SET addressed_status = $2, updated_at = now() WHERE id = $1;
@@ -380,12 +388,12 @@ WHERE pull_request_id = $1
 -- Finds findings that were persisted but never posted to GitHub.
 -- Used by the PostingRetryJob to recover from GitHub API failures.
 -- Only considers findings from completed pipeline runs (not in-progress ones)
--- that are not suppressed and have no github_comment_id.
+-- that are not suppressed and have no external_comment_id.
 SELECT f.* FROM findings f
 JOIN pipeline_runs pr ON pr.id = f.pipeline_run_id
 WHERE f.posted_at IS NULL
   AND f.suppression_reason IS NULL
-  AND f.github_comment_id IS NULL
+  AND f.external_comment_id IS NULL
   AND pr.status = 'completed'
   AND f.created_at > now() - interval '7 days'
 ORDER BY f.created_at ASC;
@@ -504,14 +512,19 @@ These defaults are for a single `mimir serve` instance. In multi-instance deploy
 
 ### Backup Strategy
 
-Production deployments **must** run PostgreSQL with:
+### Hard Requirement
 
-1. **`synchronous_commit = on` (the default).** Do not disable this. Mimir's durability model depends on committed transactions surviving a crash. With `synchronous_commit = off`, a crash between commit acknowledgment and WAL flush silently loses the transaction — including webhook-enqueued jobs and persisted findings. This is a hard requirement for "no data loss."
-2. **WAL archiving enabled.** Continuous archiving to object storage (S3, GCS, or equivalent). This enables point-in-time recovery (PITR) to any second within the retention window.
+1. **`synchronous_commit = on` (the default).** Do not disable this. Mimir's durability model depends on committed transactions surviving a crash. With `synchronous_commit = off`, a crash between commit acknowledgment and WAL flush silently loses the transaction — including webhook-enqueued jobs and persisted findings. At startup, `mimir serve` logs a warning if it detects `synchronous_commit = off` via `SHOW synchronous_commit`.
+
+### Recommended (Not Required)
+
+The following are PostgreSQL operational best practices. They are not Mimir application requirements and are not enforced at startup.
+
+2. **WAL archiving.** Continuous archiving to object storage (S3, GCS, or equivalent) enables point-in-time recovery (PITR). Recommended for production deployments where findings serve as long-lived audit data.
 3. **Periodic base backups.** At least daily via `pg_basebackup` or equivalent. Base backups + WAL archive = full PITR capability.
-4. **Retention period.** Minimum 30 days of WAL archives. Findings are long-lived audit data; the retention period should match your compliance requirements.
+4. **Retention period.** 30 days of WAL archives is a reasonable starting point; adjust to match your compliance requirements.
 
-These are PostgreSQL operational requirements, not Mimir application requirements. Mimir does not implement its own backup logic. At startup, `mimir serve` logs a warning if it detects `synchronous_commit = off` via `SHOW synchronous_commit`.
+Mimir does not implement its own backup logic. These are operational concerns for whoever manages the PostgreSQL instance.
 
 ### Deletion Policy
 

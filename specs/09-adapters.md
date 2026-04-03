@@ -72,22 +72,15 @@ type ModelAdapter interface {
 
 **M1 implementation:** `internal/runtime.AnthropicModel`
 
-### AnthropicModel Constructor
+### Implementation Notes
 
-```go
-type AnthropicModelConfig struct {
-    APIKey     string
-    ModelID    string // e.g. "claude-opus-4-6"
-    MaxTokens  int
-    HTTPClient *http.Client // optional; defaults to http.DefaultClient with timeout
-}
+The `AnthropicModel` constructor and config are defined in `internal/runtime`, not in `pkg/adapter` — they are implementation details, not part of the interface contract. See Spec 05 for the Anthropic-specific implementation.
 
-func NewAnthropicModel(cfg AnthropicModelConfig) *AnthropicModel
-```
+M2+ providers (e.g., AWS Bedrock, OpenAI, Google Vertex) each get their own `ModelAdapter` implementation in `internal/runtime` with provider-specific config. The `ModelAdapter` interface itself is provider-agnostic — any implementation that accepts a `ReviewTask` + `Slice` and returns `[]Finding` satisfies it.
 
-The `Infer` method:
+The M1 `AnthropicModel.Infer` method:
 1. Assembles the Messages API request (system prompt + user message with slice)
-2. Sends via `POST https://api.anthropic.com/v1/messages`
+2. Sends via the Anthropic Messages API
 3. Parses the structured JSON response from the model's output
 4. Maps to `[]core.Finding`, populating `ModelID`, `PromptTokens`, `CompletionTokens` from the API response
 
@@ -166,7 +159,7 @@ type PolicyAdapter interface {
     // Used by Triage internally; exposed for testing and simple policy implementations.
     ShouldEscalate(ctx context.Context, f core.Finding) bool
 
-    // MaxFindingsPerPR returns the inline comment cap.
+    // MaxFindingsPerPR returns the inline comment cap. 0 means no cap.
     MaxFindingsPerPR() int
 }
 ```

@@ -393,3 +393,12 @@ func deduplicateFindings(findings []core.Finding) deduplicateResult {
     return deduplicateResult{kept: kept, suppressed: suppressed}
 }
 ```
+
+### Suppression Visibility
+
+Suppressed findings are persisted to the database and surfaced to end users in two ways:
+
+1. **Summary comment.** The PR summary comment includes a "Suppressed Findings" section showing counts by reason (duplicate, low confidence, dismissed fingerprint) so reviewers know what was filtered and why.
+2. **CLI output.** `mimir review --show-suppressed` includes suppressed findings in the output table, annotated with their suppression reason.
+
+Suppressed findings may contain critical information — especially duplicates where the underlying issue persists across pushes. Full visibility ensures nothing is silently hidden.
