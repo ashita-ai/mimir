@@ -1,11 +1,11 @@
 -- +goose Up
 
--- pull_requests: one row per GitHub PR event received.
--- Unique on (github_pr_id, head_sha) so a force-push creates a new row.
+-- pull_requests: one row per PR event received from any hosting platform.
+-- Unique on (external_pr_id, head_sha) so a force-push creates a new row.
 -- Soft-deleted via deleted_at (spec 07: ON DELETE RESTRICT everywhere, no cascades).
 CREATE TABLE pull_requests (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    github_pr_id    BIGINT      NOT NULL,
+    external_pr_id    BIGINT      NOT NULL,
     repo_full_name  TEXT        NOT NULL,
     pr_number       INT         NOT NULL,
     head_sha        TEXT        NOT NULL,
@@ -17,7 +17,7 @@ CREATE TABLE pull_requests (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    UNIQUE (github_pr_id, head_sha)
+    UNIQUE (external_pr_id, head_sha)
 );
 
 CREATE INDEX pull_requests_repo_pr_idx ON pull_requests (repo_full_name, pr_number);
@@ -106,7 +106,7 @@ CREATE TABLE findings (
 
     -- Lifecycle
     posted_at                 TIMESTAMPTZ,
-    github_comment_id         BIGINT,
+    external_comment_id         BIGINT,
     addressed_in_next_commit  BOOLEAN     NOT NULL DEFAULT FALSE,
     suppression_reason        TEXT,
     dismissed_at              TIMESTAMPTZ,

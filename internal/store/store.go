@@ -83,7 +83,7 @@ func (s *Store) UpsertPullRequest(ctx context.Context, pr *core.PullRequest) err
 
 	row, err := s.q.UpsertPullRequest(ctx, dbsqlc.UpsertPullRequestParams{
 		ID:           pr.ID,
-		GithubPrID:   pr.GitHubPRID,
+		ExternalPrID:   pr.ExternalPRID,
 		RepoFullName: pr.RepoFullName,
 		PrNumber:     int32(pr.PRNumber),
 		HeadSha:      pr.HeadSHA,
@@ -110,7 +110,7 @@ func (s *Store) GetPullRequest(ctx context.Context, id uuid.UUID) (*core.PullReq
 
 	pr := &core.PullRequest{
 		ID:           row.ID,
-		GitHubPRID:   row.GithubPrID,
+		ExternalPRID:   row.ExternalPrID,
 		RepoFullName: row.RepoFullName,
 		PRNumber:     int(row.PrNumber),
 		HeadSHA:      row.HeadSha,
@@ -400,7 +400,7 @@ func (s *Store) ListUnpostedFindings(ctx context.Context, pullRequestID uuid.UUI
 func (s *Store) MarkFindingPosted(ctx context.Context, id uuid.UUID, commentID int64) error {
 	n, err := s.q.MarkFindingPosted(ctx, dbsqlc.MarkFindingPostedParams{
 		ID:              id,
-		GithubCommentID: pgtype.Int8{Int64: commentID, Valid: true},
+		ExternalCommentID: pgtype.Int8{Int64: commentID, Valid: true},
 	})
 	if err != nil {
 		return fmt.Errorf("store: mark finding posted %s: %w", id, err)
@@ -590,7 +590,7 @@ func findingFromRow(row dbsqlc.Finding) (core.Finding, error) {
 		ContentHash:           stringFromText(row.ContentHash),
 		HeadSHA:               row.HeadSha,
 		PostedAt:              row.PostedAt,
-		GitHubCommentID:       int64PtrFromInt8(row.GithubCommentID),
+		ExternalCommentID:       int64PtrFromInt8(row.ExternalCommentID),
 		AddressedInNextCommit: row.AddressedInNextCommit,
 		SuppressionReason:     stringFromText(row.SuppressionReason),
 		DismissedAt:           row.DismissedAt,

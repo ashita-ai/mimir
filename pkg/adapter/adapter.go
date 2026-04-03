@@ -109,22 +109,15 @@ type IndexRequest struct {
 // PolicyAdapter gates findings before they are posted to the code host.
 // See ADR-0005 for the two-tier posting strategy.
 type PolicyAdapter interface {
-	// ShouldPost returns true if the individual finding should be posted.
-	// Checks confidence tier, severity, dedup state, and rate limits.
-	ShouldPost(ctx context.Context, f core.Finding) bool
+	// Triage partitions findings into posting tiers: inline (diff comments),
+	// summary (table in the summary comment), suppress (not posted).
+	// Enforces escalation rules and dedup. All high-confidence findings are posted inline.
+	Triage(ctx context.Context, findings []core.Finding) (inline, summary, suppress []core.Finding)
 
 	// ShouldEscalate returns true if the finding should bypass normal
 	// suppression rules (e.g. low-confidence but security/critical).
+	// Used by Triage internally; exposed for testing and simple policy implementations.
 	ShouldEscalate(ctx context.Context, f core.Finding) bool
-
-	// MaxFindingsPerPR returns the cap on inline comments per PR.
-	// Default: 7. Overflow findings move to the summary comment.
-	MaxFindingsPerPR() int
-
-	// Triage partitions findings into posting tiers: inline (diff comments),
-	// summary (table in the summary comment), suppress (not posted).
-	// Enforces the inline cap, escalation rules, and severity priority.
-	Triage(ctx context.Context, findings []core.Finding) (inline, summary, suppress []core.Finding)
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +141,7 @@ type StoreAdapter interface {
 	// --- Pull Requests ---
 
 	// UpsertPullRequest creates or updates a PR record. Upsert key is
-	// (github_pr_id, head_sha).
+	// (external_pr_id, head_sha).
 	UpsertPullRequest(ctx context.Context, pr *core.PullRequest) error
 
 	// GetPullRequest retrieves a PR by its internal UUID.

@@ -26,7 +26,7 @@ type PullRequest struct {
     PRNumber      int
     HeadSHA       string
     BaseSHA       string
-    Author        string          // GitHub username
+    Author        string          // username on the hosting platform
     State         PRState         // open | closed | merged
     Diff          string          // full unified diff
     ChangedFiles  []string        // file paths from diff
@@ -73,13 +73,17 @@ const (
     TaskTypeStyle        TaskType = "style"
 )
 
+// TaskStatus tracks the lifecycle of a ReviewTask.
+// "completed" means the task ran successfully and produced findings (possibly zero).
+// "failed" means the task encountered an error (model timeout, parse failure, etc.).
+// These are terminal states — a task never transitions out of completed or failed.
 type TaskStatus string
 
 const (
     TaskStatusPending   TaskStatus = "pending"
     TaskStatusRunning   TaskStatus = "running"
-    TaskStatusCompleted TaskStatus = "completed"
-    TaskStatusFailed    TaskStatus = "failed"
+    TaskStatusCompleted TaskStatus = "completed" // success — findings were produced
+    TaskStatusFailed    TaskStatus = "failed"    // error — see ReviewTask.Error
 )
 
 type RiskScore float64
@@ -129,7 +133,7 @@ type Finding struct {
     AddressedStatus AddressedStatus // unaddressed | likely_addressed | confirmed
     SuppressionReason *string       // nil if not suppressed; "duplicate", "low_confidence", "dismissed_fingerprint"
     DismissedAt     *time.Time
-    DismissedBy     *string         // GitHub username
+    DismissedBy     *string         // username on the hosting platform
 
     // Provenance
     ModelID         string
@@ -203,14 +207,14 @@ type SymbolTable struct {
 }
 
 type Symbol struct {
-    Name           string
-    Kind           SymbolKind // func | method | type | interface
-    FilePath       string
-    StartLine      int
-    EndLine        int
-    Package        string     // resolved package path
-    Exported       bool       // starts with uppercase (Go), exported keyword, etc.
-    ParameterCount int        // number of parameters (funcs/methods only; 0 for types)
+    Name       string
+    Kind       SymbolKind // func | method | type | interface
+    FilePath   string
+    StartLine  int
+    EndLine    int
+    Package    string     // resolved package path
+    Exported   bool       // starts with uppercase (Go), exported keyword, etc.
+    ParamCount int        // number of parameters (funcs/methods only; 0 for types/interfaces)
 }
 
 type SymbolKind string
@@ -282,7 +286,7 @@ type FindingEvent struct {
     EventType string          // "created", "posted", "suppressed", "addressed", "dismissed",
                               // "resolved", "confidence_adjusted", "tier_changed",
                               // "thumbs_up", "thumbs_down"
-    Actor     string          // GitHub username or "mimir" for system events
+    Actor     string          // platform username or "mimir" for system events
     OldValue  *string         // previous state (e.g. old confidence score, old tier)
     NewValue  *string         // new state
     Metadata  json.RawMessage

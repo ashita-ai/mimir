@@ -97,7 +97,7 @@ Posting all findings as inline comments creates noise. The `PostSummaryComment` 
 | **Low confidence** (< 0.50) | Suppressed entirely, unless escalation criteria met |
 | **Escalated** (security/critical, any confidence) | Inline comment regardless of tier |
 
-**Inline comment cap:** Maximum 7 inline comments per PR. If more than 7 high-confidence findings exist, the top 7 by severity are posted inline; the rest move to the summary comment.
+**No inline comment cap.** All high-confidence and escalated findings are posted inline. Capping forces a fix-and-rerun treadmill where the author fixes N, pushes, sees N more, and repeats. Surfacing all findings in one pass is better UX even if the list is long.
 
 **Summary comment structure:**
 

@@ -40,7 +40,7 @@ type Finding struct {
 	ContentHash           pgtype.Text     `json:"content_hash"`
 	HeadSha               string          `json:"head_sha"`
 	PostedAt              *time.Time      `json:"posted_at"`
-	GithubCommentID       pgtype.Int8     `json:"github_comment_id"`
+	ExternalCommentID       pgtype.Int8     `json:"external_comment_id"`
 	AddressedInNextCommit bool            `json:"addressed_in_next_commit"`
 	SuppressionReason     pgtype.Text     `json:"suppression_reason"`
 	DismissedAt           *time.Time      `json:"dismissed_at"`
@@ -83,7 +83,7 @@ type PipelineRun struct {
 
 type PullRequest struct {
 	ID           uuid.UUID       `json:"id"`
-	GithubPrID   int64           `json:"github_pr_id"`
+	ExternalPrID   int64           `json:"external_pr_id"`
 	RepoFullName string          `json:"repo_full_name"`
 	PrNumber     int32           `json:"pr_number"`
 	HeadSha      string          `json:"head_sha"`

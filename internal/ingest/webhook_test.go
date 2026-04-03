@@ -199,7 +199,7 @@ func TestWebhookHandler_PREventFields(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rr.Code)
 	assert.Equal(t, "ashita-ai/mimir", got.RepoFullName)
 	assert.Equal(t, 42, got.PRNumber)
-	assert.Equal(t, int64(99999), got.GitHubPRID)
+	assert.Equal(t, int64(99999), got.ExternalPRID)
 	assert.Equal(t, "abc123", got.HeadSHA)
 	assert.Equal(t, "def456", got.BaseSHA)
 	assert.Equal(t, "testuser", got.Author)

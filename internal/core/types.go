@@ -89,7 +89,7 @@ type RiskScore float64
 // and passed through the pipeline — they are not persisted in the database.
 type PullRequest struct {
 	ID           uuid.UUID      `json:"id"`
-	GitHubPRID   int64          `json:"github_pr_id"`
+	ExternalPRID   int64          `json:"external_pr_id"`
 	RepoFullName string         `json:"repo_full_name"`
 	PRNumber     int            `json:"pr_number"`
 	HeadSHA      string         `json:"head_sha"`
@@ -178,7 +178,7 @@ type Finding struct {
 
 	// Lifecycle.
 	PostedAt              *time.Time `json:"posted_at,omitempty"`
-	GitHubCommentID       *int64     `json:"github_comment_id,omitempty"`
+	ExternalCommentID       *int64     `json:"external_comment_id,omitempty"`
 	AddressedInNextCommit bool       `json:"addressed_in_next_commit"`
 	SuppressionReason     string     `json:"suppression_reason,omitempty"`
 	DismissedAt           *time.Time `json:"dismissed_at,omitempty"`

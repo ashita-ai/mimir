@@ -102,7 +102,7 @@ func TestUpsertAndGetPullRequest(t *testing.T) {
 	ctx := context.Background()
 
 	pr := &core.PullRequest{
-		GitHubPRID:   12345,
+		ExternalPRID:   12345,
 		RepoFullName: "ashita-ai/mimir",
 		PRNumber:     42,
 		HeadSHA:      "abc123",
@@ -129,7 +129,7 @@ func TestUpsertAndGetPullRequest(t *testing.T) {
 	assert.Equal(t, "test", got.Metadata["source"])
 	assert.Nil(t, got.DeletedAt)
 
-	// Upsert same (github_pr_id, head_sha) — should update, not insert.
+	// Upsert same (external_pr_id, head_sha) — should update, not insert.
 	pr.State = core.PRStateMerged
 	err = st.UpsertPullRequest(ctx, pr)
 	require.NoError(t, err)
@@ -375,8 +375,8 @@ func TestMarkFindingPosted(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, findings, 1)
 	assert.NotNil(t, findings[0].PostedAt)
-	assert.NotNil(t, findings[0].GitHubCommentID)
-	assert.Equal(t, int64(999888), *findings[0].GitHubCommentID)
+	assert.NotNil(t, findings[0].ExternalCommentID)
+	assert.Equal(t, int64(999888), *findings[0].ExternalCommentID)
 }
 
 func TestMarkFindingAddressed(t *testing.T) {
@@ -575,7 +575,7 @@ func TestWithTx_Commit(t *testing.T) {
 	var prID uuid.UUID
 	err := st.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
 		pr := &core.PullRequest{
-			GitHubPRID:   time.Now().UnixNano(),
+			ExternalPRID:   time.Now().UnixNano(),
 			RepoFullName: "ashita-ai/mimir",
 			PRNumber:     99,
 			HeadSHA:      "txtest",
@@ -605,7 +605,7 @@ func TestWithTx_Rollback(t *testing.T) {
 	var prID uuid.UUID
 	err := st.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
 		pr := &core.PullRequest{
-			GitHubPRID:   time.Now().UnixNano(),
+			ExternalPRID:   time.Now().UnixNano(),
 			RepoFullName: "ashita-ai/mimir",
 			PRNumber:     99,
 			HeadSHA:      "rollbacktest",
@@ -634,7 +634,7 @@ func TestWithTx_Rollback(t *testing.T) {
 func insertTestPR(t *testing.T, st *store.Store) *core.PullRequest {
 	t.Helper()
 	pr := &core.PullRequest{
-		GitHubPRID:   time.Now().UnixNano(), // unique per test
+		ExternalPRID:   time.Now().UnixNano(), // unique per test
 		RepoFullName: "ashita-ai/mimir",
 		PRNumber:     1,
 		HeadSHA:      uuid.New().String()[:8],

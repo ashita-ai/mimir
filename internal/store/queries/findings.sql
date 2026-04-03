@@ -22,7 +22,7 @@ SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
        location_hash, content_hash, head_sha,
-       posted_at, github_comment_id, addressed_in_next_commit,
+       posted_at, external_comment_id, addressed_in_next_commit,
        suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
@@ -43,7 +43,7 @@ SELECT f.id, f.review_task_id, f.pull_request_id, f.pipeline_run_id,
        f.category, f.confidence_tier, f.confidence_score, f.severity,
        f.title, f.body, f.suggestion,
        f.location_hash, f.content_hash, f.head_sha,
-       f.posted_at, f.github_comment_id, f.addressed_in_next_commit,
+       f.posted_at, f.external_comment_id, f.addressed_in_next_commit,
        f.suppression_reason, f.dismissed_at, f.dismissed_by,
        f.model_id, f.prompt_tokens, f.completion_tokens, f.metadata,
        f.created_at, f.updated_at
@@ -60,7 +60,7 @@ SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
        location_hash, content_hash, head_sha,
-       posted_at, github_comment_id, addressed_in_next_commit,
+       posted_at, external_comment_id, addressed_in_next_commit,
        suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
@@ -76,7 +76,7 @@ SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
        location_hash, content_hash, head_sha,
-       posted_at, github_comment_id, addressed_in_next_commit,
+       posted_at, external_comment_id, addressed_in_next_commit,
        suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
@@ -88,7 +88,7 @@ ORDER BY confidence_score DESC;
 
 -- name: MarkFindingPosted :execrows
 UPDATE findings
-SET posted_at = now(), github_comment_id = $2
+SET posted_at = now(), external_comment_id = $2
 WHERE id = $1;
 
 -- name: MarkFindingAddressed :execrows

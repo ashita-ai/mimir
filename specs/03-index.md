@@ -27,14 +27,29 @@ Tree-sitter requires files on disk. The pipeline cannot operate solely on GitHub
 ```go
 // checkoutRepo creates a shallow clone of the repo at the given SHA.
 // Returns the path to the checkout directory and a cleanup function.
-// os.MkdirTemp creates a fresh, unique directory each time — there is
-// no risk of stale files from a prior run.
 func checkoutRepo(ctx context.Context, repoFullName, headSHA, baseSHA, token string) (string, func(), error) {
     dir, err := os.MkdirTemp("", "mimir-checkout-*")
     if err != nil {
         return "", nil, fmt.Errorf("create temp dir: %w", err)
     }
     cleanup := func() { os.RemoveAll(dir) }
+
+    // Ensure the temp directory is empty before cloning. os.MkdirTemp creates
+    // a fresh directory, but if we ever switch to a reusable cache directory
+    // or the OS recycles temp paths, stale files could corrupt the checkout.
+    entries, err := os.ReadDir(dir)
+    if err != nil {
+        cleanup()
+        return "", nil, fmt.Errorf("read temp dir: %w", err)
+    }
+    if len(entries) > 0 {
+        cleanup()
+        dir, err = os.MkdirTemp("", "mimir-checkout-*")
+        if err != nil {
+            return "", nil, fmt.Errorf("create fresh temp dir: %w", err)
+        }
+        cleanup = func() { os.RemoveAll(dir) }
+    }
 
     // Shallow clone with only the commits we need.
     // --filter=blob:none fetches tree structure immediately but defers blob
@@ -61,21 +76,25 @@ func checkoutRepo(ctx context.Context, repoFullName, headSHA, baseSHA, token str
 
 1. **Created** at the start of the River job handler, before `BuildSymbolTable`.
 2. **Used** by `BuildSymbolTable` and `Query` (via the `repoPath` parameter on `IndexAdapter`).
-3. **Used** by `addressed_in_next_commit` (re-parsing files at the new head SHA).
-4. **Cleaned up** via `defer cleanup()` immediately after creation in the River job handler. The checkout directory is ephemeral — it does not survive process restarts. If River re-enqueues the job, a fresh checkout is created.
+3. **Used** by `addressed_in_next_commit` (M2 — re-parsing files at the new head SHA).
+4. **Cleaned up** via `defer cleanup()` in the River job handler. The `defer` ensures cleanup runs even on panic. The checkout directory is ephemeral — it does not survive process restarts. If River re-enqueues the job, a fresh checkout is created.
 
+**Caller usage:**
 ```go
-// In the River job handler (ReviewPipelineWorker.Work):
-repoPath, cleanup, err := checkoutRepo(ctx, pr.RepoFullName, pr.HeadSHA, pr.BaseSHA, token)
-if err != nil {
-    return fmt.Errorf("checkout: %w", err)
+func (w *ReviewWorker) Work(ctx context.Context, job *river.Job[ReviewPipelineJob]) error {
+    repoPath, cleanup, err := checkoutRepo(ctx, ...)
+    if err != nil {
+        return err
+    }
+    defer cleanup() // runs on return AND on panic
+
+    // ... pipeline stages ...
 }
-defer cleanup() // runs even on panic — cleanup is unconditional
 ```
 
 ### Security
 
-The clone URL uses the installation token (or PAT), not embedded credentials. The temp directory is created with restrictive permissions (`0700` via `os.MkdirTemp` defaults). The cleanup function runs even on panic via `defer`.
+The clone URL uses the installation token (or PAT), not embedded credentials. The temp directory is created with restrictive permissions (`0700` via `os.MkdirTemp` defaults). The `defer cleanup()` pattern guarantees the directory is removed even if the pipeline panics.
 
 ### Disk Budget
 
@@ -90,7 +109,7 @@ A blobless clone of a typical 10k-file Go repo is ~50–100 MB on disk. With 5 c
 | Go | `smacker/go-tree-sitter` | Full: `import` blocks → package path matching | `_test.go` in same package | `false` |
 | Python | tree-sitter-python | Approximate: `import`/`from` statements, no `__init__.py` re-export tracking | `test_*.py`, `*_test.py` | `true` |
 | TypeScript | tree-sitter-typescript | Approximate: `import`/`require`, no barrel export resolution | `*.test.ts`, `*.spec.ts`, `*.test.tsx`, `*.spec.tsx` | `true` |
-| PHP | tree-sitter-php | Approximate: `use` statements, PSR-4 namespace conventions | `*Test.php` in same dir or `tests/{relative_path}/*Test.php` (PSR-4 mirror) | `true` |
+| PHP | tree-sitter-php | Approximate: `use` statements, PSR-4 namespace conventions | `*Test.php` in same namespace | `true` |
 | YAML/Helm | None | None | None | N/A (skip index) |
 
 For files with no tree-sitter grammar (YAML, Markdown, config files, etc.), the index returns an empty result. The runtime uses the full token budget for the raw diff.
@@ -137,11 +156,16 @@ Step 4: Parse importer files, extract references (Symbol match — Pass 2)
 
 Step 5: Identify test files
     For each changed file:
-        Apply language-specific heuristic:
+        Apply language-specific heuristic (check in order, use first match):
             Go:    same_dir/{base}_test.go
             Python: same_dir/test_{base}.py or same_dir/{base}_test.py
             TS:    same_dir/{base}.test.ts or same_dir/{base}.spec.ts
-            PHP:   same_dir/{base}Test.php or tests/{relative_path}/{base}Test.php
+            PHP:   same_dir/{base}Test.php
+        If no match in same_dir, check mirrored path under tests/:
+            PHP:   tests/{relative_dir}/{base}Test.php
+            Python: tests/{relative_dir}/test_{base}.py
+            TS:    tests/{relative_dir}/{base}.test.ts
+        (Go tests are always co-located by convention; no tests/ fallback.)
         If test file exists: SymbolTable.TestFiles[file] = [test_file]
 
 Step 6: Return SymbolTable
@@ -312,13 +336,9 @@ For each of the 12 files, tree-sitter parse and search for `auth.ValidateToken` 
 
 These 4 files are the callers. Their relevant functions (the ones containing the call) are added to `SymbolRefs["ValidateToken"]`.
 
-### Known Limitations
+### Known Limitation
 
-**Alias collision (all languages).** If two imported packages alias to the same name (e.g., `auth "pkg/a"` and `auth "pkg/b"`), Pass 2 cannot distinguish them. Both are included as potential callers. This is the "approximate" in `IsApproximate()`. The confidence penalty and prompt annotation handle this downstream.
-
-**PHP import fan-out.** PHP `use` statements import individual classes, but PSR-4 namespaces can be broad. A widely-used utility class (e.g., `App\Helpers\StringUtil`) may appear in `use` blocks across hundreds of files, making Pass 1 return far more candidates than Go or Python. To mitigate this: (1) Pass 1 results are capped at 50 files — if more than 50 files import the package, the index falls back to diff-only context for that symbol. (2) `IsApproximate()` is always `true` for PHP, so findings carry the confidence penalty and prompt warning regardless.
-
-**TypeScript barrel exports.** TypeScript's `export * from './foo'` pattern in barrel (`index.ts`) files means imports may not directly reference the source file. Pass 1 catches direct imports but misses re-exports through barrels. Like PHP, `IsApproximate() = true` for TypeScript, and the confidence penalty applies.
+If two imported packages alias to the same name (e.g., `auth "pkg/a"` and `auth "pkg/b"`), Pass 2 cannot distinguish them. Both are included as potential callers. This is the "approximate" in `IsApproximate()`. The confidence penalty and prompt annotation handle this downstream.
 
 ---
 

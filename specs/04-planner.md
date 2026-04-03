@@ -72,6 +72,13 @@ func computeRiskScore(sym core.Symbol, filePath string, hasTests bool, changedLi
         score += 0.05 // functions are riskier than types
     }
 
+    // Parameter count — high arity correlates with complexity and interface fragility.
+    if sym.ParamCount > 5 {
+        score += 0.1 // many parameters = harder to reason about
+    } else if sym.ParamCount > 3 {
+        score += 0.05
+    }
+
     // Test coverage signal
     if !hasTests {
         score += 0.15 // untested code = higher risk
@@ -157,7 +164,7 @@ func assignTaskTypes(sym core.Symbol, filePath string) []core.TaskType {
 
     // Style: for large functions, functions with many parameters, or high complexity.
     // Style review of small, simple functions is not worth the model call.
-    if sym.EndLine-sym.StartLine > 30 || sym.ParameterCount > 5 {
+    if sym.EndLine-sym.StartLine > 30 || sym.ParamCount > 5 {
         types = append(types, core.TaskTypeStyle)
     }
 

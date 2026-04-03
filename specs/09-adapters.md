@@ -56,7 +56,7 @@ type PostCommentRequest struct {
 
 ```go
 // ModelAdapter abstracts LLM inference.
-// M1: AnthropicModel. M2+: OpenAIModel, GeminiModel.
+// M1: AnthropicModel (direct API). M2+: BedrockModel, OpenAIModel, GeminiModel.
 type ModelAdapter interface {
     // Infer sends a review task + context slice to the model.
     // Returns structured findings parsed from the model's response.
@@ -72,15 +72,22 @@ type ModelAdapter interface {
 
 **M1 implementation:** `internal/runtime.AnthropicModel`
 
-### Implementation Notes
+### AnthropicModel Constructor
 
-The `AnthropicModel` constructor and config are defined in `internal/runtime`, not in `pkg/adapter` — they are implementation details, not part of the interface contract. See Spec 05 for the Anthropic-specific implementation.
+```go
+type AnthropicModelConfig struct {
+    APIKey     string
+    ModelID    string // e.g. "claude-opus-4-6"
+    MaxTokens  int
+    HTTPClient *http.Client // optional; defaults to http.DefaultClient with timeout
+}
 
-M2+ providers (e.g., AWS Bedrock, OpenAI, Google Vertex) each get their own `ModelAdapter` implementation in `internal/runtime` with provider-specific config. The `ModelAdapter` interface itself is provider-agnostic — any implementation that accepts a `ReviewTask` + `Slice` and returns `[]Finding` satisfies it.
+func NewAnthropicModel(cfg AnthropicModelConfig) *AnthropicModel
+```
 
-The M1 `AnthropicModel.Infer` method:
+The `Infer` method:
 1. Assembles the Messages API request (system prompt + user message with slice)
-2. Sends via the Anthropic Messages API
+2. Sends via `POST https://api.anthropic.com/v1/messages`
 3. Parses the structured JSON response from the model's output
 4. Maps to `[]core.Finding`, populating `ModelID`, `PromptTokens`, `CompletionTokens` from the API response
 
@@ -90,7 +97,7 @@ The M1 `AnthropicModel.Infer` method:
 
 ```go
 // StaticToolAdapter abstracts static analysis tools.
-// M1: interface only, no implementations. M2: SemgrepTool, GolangciLintTool.
+// M1: SemgrepTool. M2: GolangciLintTool, custom.
 type StaticToolAdapter interface {
     // Run executes the tool on the given files and returns findings.
     Run(ctx context.Context, task core.ReviewTask, files []string) ([]core.Finding, error)
@@ -103,7 +110,7 @@ type StaticToolAdapter interface {
 }
 ```
 
-No M1 implementation. The runtime call site exists but is a no-op when the adapter list is empty.
+**M1 implementation:** `internal/runtime.SemgrepTool` — runs `semgrep --json` with a curated ruleset. Static tool findings are injected into the model prompt as grounding context AND collected as findings in their own right. M2 adds golangci-lint and custom tool support.
 
 ---
 
@@ -152,15 +159,12 @@ type PolicyAdapter interface {
     // Triage partitions findings into posting tiers.
     // Returns: inline (posted as diff comments), summary (summary table only),
     // suppress (not posted).
-    // Enforces inline cap, escalation rules, and dedup.
+    // Enforces escalation rules and dedup. All high-confidence findings are posted inline.
     Triage(ctx context.Context, findings []core.Finding) (inline, summary, suppress []core.Finding)
 
     // ShouldEscalate returns true if the finding bypasses normal posting rules.
     // Used by Triage internally; exposed for testing and simple policy implementations.
     ShouldEscalate(ctx context.Context, f core.Finding) bool
-
-    // MaxFindingsPerPR returns the inline comment cap. 0 means no cap.
-    MaxFindingsPerPR() int
 }
 ```
 
@@ -225,7 +229,7 @@ type PipelineRunStats struct {
     TasksCompleted  int
     TasksFailed     int
     FindingsTotal   int
-    FindingsPosted  int // inline + summary findings actually posted to GitHub
+    FindingsPosted  int // inline + summary findings actually posted to the hosting platform
     FindingsSuppressed int // suppressed (duplicate, low_confidence, dismissed)
 }
 ```
@@ -264,6 +268,8 @@ type GitHubProviderConfig struct {
 ```
 
 The wiring layer in `cmd/mimir` constructs all adapters and injects them into pipeline stages. No dependency injection framework — explicit construction.
+
+The `GitHubProviderConfig` example above is implementation-specific (M1). A `GitLabProviderConfig` would have different fields (personal access token, project ID, etc.) but the same constructor pattern. The `ProviderAdapter` interface is the contract — implementations are free to require whatever config they need.
 
 ---
 

@@ -35,7 +35,7 @@ func (w *ReviewWorker) Work(ctx context.Context, job *river.Job[ReviewJobArgs]) 
 
 	// Step 1: Upsert the PR record so all downstream tasks can reference it.
 	pr := &core.PullRequest{
-		GitHubPRID:   args.GitHubPRID,
+		ExternalPRID:   args.ExternalPRID,
 		RepoFullName: args.RepoFullName,
 		PRNumber:     args.PRNumber,
 		HeadSHA:      args.HeadSHA,
