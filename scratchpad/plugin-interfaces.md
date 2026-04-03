@@ -124,7 +124,7 @@ type TokenBudget struct {
 
 ## `PolicyAdapter`
 
-Controls what gets posted and when. See `adr-0005-service-architecture.md` review notes for the two-tier posting strategy.
+Controls what gets posted and when. See `adr/0005-service-architecture.md` review notes for the two-tier posting strategy.
 
 ```go
 // PolicyAdapter gates findings before they are posted to the provider.
