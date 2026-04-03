@@ -22,6 +22,8 @@ linters-settings:
       - G104  # errcheck is already enforced; duplicate suppression in gosec is noisy
 
 issues:
+  exclude-dirs:
+    - internal/store/dbsqlc  # sqlc-generated code
   exclude-rules:
     # Test files don't need gosec or errcheck strictness
     - path: "_test\\.go"
