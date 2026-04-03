@@ -68,7 +68,7 @@ GitHub Webhook (pull_request: opened | synchronize | reopened)
         ├── Apply confidence penalties (approximate index: ×0.85)
         ├── Dedup against prior findings (location_hash + content_hash)
         ├── Check dismissed_fingerprints
-        ├── Partition: inline (≤7, high confidence) | summary | suppress
+        ├── Partition: inline (high confidence, no cap) | summary | suppress
         ├── Escalation overrides (security/critical → always inline)
         └── Output: inline []Finding, summary []Finding, suppress []Finding
         │
@@ -129,16 +129,15 @@ No package in `internal/` imports another `internal/` package except through int
 | Model routing per task type | Yes | Config map: task_type → model_id |
 | Slice budgeting | Yes | Cap-not-allocation, dynamic redistribution |
 | Anthropic ModelAdapter | Yes | Claude Opus default |
-| Two-tier posting | Yes | Inline (≤7) + summary comment |
+| Two-tier posting | Yes | Inline (high confidence, no cap) + summary comment |
 | Dual-hash fingerprinting | Yes | location_hash + content_hash dedup |
-| `addressed_in_next_commit` | Yes | Content-hash re-check (Option B), TEXT column |
+| `addressed_in_next_commit` | Schema only | M2 detection logic; M1 relies on natural dedup via content hash |
 | Reaction-based feedback | Yes | Poll GitHub reactions, write finding_events |
 | Pipeline run audit records | Yes | Every execution creates a `pipeline_runs` row |
 | Append-only finding event log | Yes | All lifecycle transitions recorded in `finding_events` |
 | `mimir serve` | Yes | HTTP + River workers, dual mode |
 | `mimir review` | Yes | One-shot CLI, stdout output |
-| Static tool adapters | Interface only | No M1 implementations |
-| Semgrep integration | No | M2 |
+| Semgrep integration | Yes | Static tool grounding for LLM findings; SemgrepTool adapter |
 | golangci-lint integration | No | M2 |
 | Helm-aware static tooling | No | M2 |
 | LSP-based index (gopls) | No | M2 |

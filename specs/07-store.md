@@ -169,6 +169,11 @@ CREATE TABLE dismissed_fingerprints (
 -- finding_events is the append-only audit log for all finding lifecycle transitions.
 -- Every mutation to a finding (creation, posting, addressing, suppression, confidence
 -- adjustment, tier change) is recorded here, not just reactions.
+--
+-- M1 scope: reaction events (thumbs_up/down) are required for the eval feedback loop.
+-- Full lifecycle auditing (confidence_adjusted, tier_changed, etc.) ships in M1 because
+-- the write cost is negligible and it's harder to backfill than to capture from day one.
+-- Query/reporting UIs for the audit log are M2+ / enterprise scope.
 CREATE TABLE finding_events (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     finding_id  UUID NOT NULL REFERENCES findings(id) ON DELETE RESTRICT,
@@ -348,18 +353,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 RETURNING *;
 
 -- name: ListFindingsForPR :many
-SELECT * FROM findings WHERE pull_request_id = $1
-ORDER BY CASE severity
-    WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3
-    WHEN 'low' THEN 4 WHEN 'info' THEN 5 END,
-    confidence_score DESC;
+SELECT * FROM findings WHERE pull_request_id = $1 ORDER BY severity, confidence_score DESC;
 
 -- name: ListFindingsForRun :many
-SELECT * FROM findings WHERE pipeline_run_id = $1
-ORDER BY CASE severity
-    WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3
-    WHEN 'low' THEN 4 WHEN 'info' THEN 5 END,
-    confidence_score DESC;
+SELECT * FROM findings WHERE pipeline_run_id = $1 ORDER BY severity, confidence_score DESC;
 
 -- name: MarkFindingPosted :exec
 UPDATE findings SET posted_at = now(), external_comment_id = $2, updated_at = now() WHERE id = $1;
@@ -512,19 +509,14 @@ These defaults are for a single `mimir serve` instance. In multi-instance deploy
 
 ### Backup Strategy
 
-### Hard Requirement
+Production deployments **must** run PostgreSQL with:
 
-1. **`synchronous_commit = on` (the default).** Do not disable this. Mimir's durability model depends on committed transactions surviving a crash. With `synchronous_commit = off`, a crash between commit acknowledgment and WAL flush silently loses the transaction — including webhook-enqueued jobs and persisted findings. At startup, `mimir serve` logs a warning if it detects `synchronous_commit = off` via `SHOW synchronous_commit`.
-
-### Recommended (Not Required)
-
-The following are PostgreSQL operational best practices. They are not Mimir application requirements and are not enforced at startup.
-
-2. **WAL archiving.** Continuous archiving to object storage (S3, GCS, or equivalent) enables point-in-time recovery (PITR). Recommended for production deployments where findings serve as long-lived audit data.
+1. **`synchronous_commit = on` (the default).** Do not disable this. Mimir's durability model depends on committed transactions surviving a crash. With `synchronous_commit = off`, a crash between commit acknowledgment and WAL flush silently loses the transaction — including webhook-enqueued jobs and persisted findings. This is a hard requirement for "no data loss."
+2. **WAL archiving enabled.** Continuous archiving to object storage (S3, GCS, or equivalent). This enables point-in-time recovery (PITR) to any second within the retention window.
 3. **Periodic base backups.** At least daily via `pg_basebackup` or equivalent. Base backups + WAL archive = full PITR capability.
-4. **Retention period.** 30 days of WAL archives is a reasonable starting point; adjust to match your compliance requirements.
+4. **Retention period.** Minimum 30 days of WAL archives. Findings are long-lived audit data; the retention period should match your compliance requirements.
 
-Mimir does not implement its own backup logic. These are operational concerns for whoever manages the PostgreSQL instance.
+These are PostgreSQL operational requirements, not Mimir application requirements. Mimir does not implement its own backup logic. At startup, `mimir serve` logs a warning if it detects `synchronous_commit = off` via `SHOW synchronous_commit`.
 
 ### Deletion Policy
 

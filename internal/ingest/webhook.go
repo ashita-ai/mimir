@@ -14,7 +14,7 @@ import (
 type PREvent struct {
 	RepoFullName string `json:"repo_full_name"`
 	PRNumber     int    `json:"pr_number"`
-	GitHubPRID   int64  `json:"github_pr_id"`
+	ExternalPRID   int64  `json:"external_pr_id"`
 	HeadSHA      string `json:"head_sha"`
 	BaseSHA      string `json:"base_sha"`
 	Author       string `json:"author"`
@@ -85,7 +85,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	prEvent := PREvent{
 		RepoFullName: repo.GetFullName(),
 		PRNumber:     pr.GetNumber(),
-		GitHubPRID:   pr.GetID(),
+		ExternalPRID:   pr.GetID(),
 		HeadSHA:      pr.GetHead().GetSHA(),
 		BaseSHA:      pr.GetBase().GetSHA(),
 		Author:       pr.GetUser().GetLogin(),

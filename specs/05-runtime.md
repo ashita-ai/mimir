@@ -13,7 +13,7 @@
 2. Assemble prompts and call `ModelAdapter.Infer`
 3. Fan out task execution with bounded concurrency
 4. Collect findings, handle task-level failures
-5. Invoke `StaticToolAdapter` if configured (M1: no implementations, stub call site only)
+5. Invoke `StaticToolAdapter` if configured (M1: semgrep; M2: golangci-lint, custom)
 
 ---
 
@@ -306,9 +306,9 @@ func isRetryable(err error) bool {
 
 ---
 
-## Static Tool Stub
+## Static Tool Integration
 
-M1 ships no `StaticToolAdapter` implementations, but the call site exists:
+M1 ships with a semgrep `StaticToolAdapter` implementation. Static tool findings ground the LLM review — "semgrep flagged a potential SQL injection here; evaluate whether this is a true positive" is much stronger than "look for security issues." The call site:
 
 ```go
 // In executeOneTask, after slice building and before model inference:
@@ -330,7 +330,7 @@ if deps.StaticTools != nil {
 }
 ```
 
-This call site is a no-op when `deps.StaticTools` is empty (the M1 default). M2 plugs in semgrep/golangci-lint without runtime changes.
+When `deps.StaticTools` is empty, this is a no-op. M1 ships semgrep; M2 adds golangci-lint and custom tools without runtime changes.
 
 ---
 
@@ -394,11 +394,6 @@ func deduplicateFindings(findings []core.Finding) deduplicateResult {
 }
 ```
 
-### Suppression Visibility
+### Suppression Transparency
 
-Suppressed findings are persisted to the database and surfaced to end users in two ways:
-
-1. **Summary comment.** The PR summary comment includes a "Suppressed Findings" section showing counts by reason (duplicate, low confidence, dismissed fingerprint) so reviewers know what was filtered and why.
-2. **CLI output.** `mimir review --show-suppressed` includes suppressed findings in the output table, annotated with their suppression reason.
-
-Suppressed findings may contain critical information — especially duplicates where the underlying issue persists across pushes. Full visibility ensures nothing is silently hidden.
+Suppressed findings are persisted to the database and surfaced in the summary comment (see Spec 06 for the template). The summary always includes a per-reason breakdown so users can retrieve full details via `mimir findings --suppressed --pr {pr_number}`.

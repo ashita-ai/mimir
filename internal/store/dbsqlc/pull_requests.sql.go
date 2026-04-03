@@ -14,7 +14,7 @@ import (
 )
 
 const getPullRequest = `-- name: GetPullRequest :one
-SELECT id, github_pr_id, repo_full_name, pr_number,
+SELECT id, external_pr_id, repo_full_name, pr_number,
        head_sha, base_sha, author, state, metadata,
        deleted_at, created_at, updated_at
 FROM pull_requests
@@ -26,7 +26,7 @@ func (q *Queries) GetPullRequest(ctx context.Context, id uuid.UUID) (PullRequest
 	var i PullRequest
 	err := row.Scan(
 		&i.ID,
-		&i.GithubPrID,
+		&i.ExternalPrID,
 		&i.RepoFullName,
 		&i.PrNumber,
 		&i.HeadSha,
@@ -57,10 +57,10 @@ func (q *Queries) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) (int6
 
 const upsertPullRequest = `-- name: UpsertPullRequest :one
 INSERT INTO pull_requests (
-    id, github_pr_id, repo_full_name, pr_number,
+    id, external_pr_id, repo_full_name, pr_number,
     head_sha, base_sha, author, state, metadata
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (github_pr_id, head_sha)
+ON CONFLICT (external_pr_id, head_sha)
 DO UPDATE SET
     state      = EXCLUDED.state,
     metadata   = EXCLUDED.metadata,
@@ -70,7 +70,7 @@ RETURNING id, created_at, updated_at
 
 type UpsertPullRequestParams struct {
 	ID           uuid.UUID       `json:"id"`
-	GithubPrID   int64           `json:"github_pr_id"`
+	ExternalPrID   int64           `json:"external_pr_id"`
 	RepoFullName string          `json:"repo_full_name"`
 	PrNumber     int32           `json:"pr_number"`
 	HeadSha      string          `json:"head_sha"`
@@ -89,7 +89,7 @@ type UpsertPullRequestRow struct {
 func (q *Queries) UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) (UpsertPullRequestRow, error) {
 	row := q.db.QueryRow(ctx, upsertPullRequest,
 		arg.ID,
-		arg.GithubPrID,
+		arg.ExternalPrID,
 		arg.RepoFullName,
 		arg.PrNumber,
 		arg.HeadSha,

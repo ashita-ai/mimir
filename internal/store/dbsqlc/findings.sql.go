@@ -99,7 +99,7 @@ SELECT f.id, f.review_task_id, f.pull_request_id, f.pipeline_run_id,
        f.category, f.confidence_tier, f.confidence_score, f.severity,
        f.title, f.body, f.suggestion,
        f.location_hash, f.content_hash, f.head_sha,
-       f.posted_at, f.github_comment_id, f.addressed_in_next_commit,
+       f.posted_at, f.external_comment_id, f.addressed_in_next_commit,
        f.suppression_reason, f.dismissed_at, f.dismissed_by,
        f.model_id, f.prompt_tokens, f.completion_tokens, f.metadata,
        f.created_at, f.updated_at
@@ -139,7 +139,7 @@ func (q *Queries) FindPriorFinding(ctx context.Context, arg FindPriorFindingPara
 		&i.ContentHash,
 		&i.HeadSha,
 		&i.PostedAt,
-		&i.GithubCommentID,
+		&i.ExternalCommentID,
 		&i.AddressedInNextCommit,
 		&i.SuppressionReason,
 		&i.DismissedAt,
@@ -179,7 +179,7 @@ SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
        location_hash, content_hash, head_sha,
-       posted_at, github_comment_id, addressed_in_next_commit,
+       posted_at, external_comment_id, addressed_in_next_commit,
        suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
@@ -224,7 +224,7 @@ func (q *Queries) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID
 			&i.ContentHash,
 			&i.HeadSha,
 			&i.PostedAt,
-			&i.GithubCommentID,
+			&i.ExternalCommentID,
 			&i.AddressedInNextCommit,
 			&i.SuppressionReason,
 			&i.DismissedAt,
@@ -252,7 +252,7 @@ SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
        location_hash, content_hash, head_sha,
-       posted_at, github_comment_id, addressed_in_next_commit,
+       posted_at, external_comment_id, addressed_in_next_commit,
        suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
@@ -292,7 +292,7 @@ func (q *Queries) ListUnaddressedFindings(ctx context.Context, pullRequestID uui
 			&i.ContentHash,
 			&i.HeadSha,
 			&i.PostedAt,
-			&i.GithubCommentID,
+			&i.ExternalCommentID,
 			&i.AddressedInNextCommit,
 			&i.SuppressionReason,
 			&i.DismissedAt,
@@ -320,7 +320,7 @@ SELECT id, review_task_id, pull_request_id, pipeline_run_id,
        category, confidence_tier, confidence_score, severity,
        title, body, suggestion,
        location_hash, content_hash, head_sha,
-       posted_at, github_comment_id, addressed_in_next_commit,
+       posted_at, external_comment_id, addressed_in_next_commit,
        suppression_reason, dismissed_at, dismissed_by,
        model_id, prompt_tokens, completion_tokens, metadata,
        created_at, updated_at
@@ -360,7 +360,7 @@ func (q *Queries) ListUnpostedFindings(ctx context.Context, pullRequestID uuid.U
 			&i.ContentHash,
 			&i.HeadSha,
 			&i.PostedAt,
-			&i.GithubCommentID,
+			&i.ExternalCommentID,
 			&i.AddressedInNextCommit,
 			&i.SuppressionReason,
 			&i.DismissedAt,
@@ -398,17 +398,17 @@ func (q *Queries) MarkFindingAddressed(ctx context.Context, id uuid.UUID) (int64
 
 const markFindingPosted = `-- name: MarkFindingPosted :execrows
 UPDATE findings
-SET posted_at = now(), github_comment_id = $2
+SET posted_at = now(), external_comment_id = $2
 WHERE id = $1
 `
 
 type MarkFindingPostedParams struct {
 	ID              uuid.UUID   `json:"id"`
-	GithubCommentID pgtype.Int8 `json:"github_comment_id"`
+	ExternalCommentID pgtype.Int8 `json:"external_comment_id"`
 }
 
 func (q *Queries) MarkFindingPosted(ctx context.Context, arg MarkFindingPostedParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markFindingPosted, arg.ID, arg.GithubCommentID)
+	result, err := q.db.Exec(ctx, markFindingPosted, arg.ID, arg.ExternalCommentID)
 	if err != nil {
 		return 0, err
 	}

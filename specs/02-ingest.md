@@ -46,7 +46,16 @@ Authorization: Bearer {jwt}
 → { "id": 12345, ... }
 ```
 
-Cache the `(repo_full_name → installation_id)` mapping in memory with a 1-hour TTL. Repos rarely change installations, but when they do (e.g., app is uninstalled and reinstalled, or repo is transferred to a different org), stale cache entries produce 401 errors. On any 401 from an installation token request, evict the cached entry, re-resolve, and retry once. If the retry also fails, the job fails with an auth error (non-retryable).
+Cache the `(repo_full_name → installation_id)` mapping in memory.
+
+### Installation Changes
+
+When a repository changes its GitHub App installation (e.g., the app is uninstalled and reinstalled under a different org), the cached `installation_id` becomes stale. Handle this by:
+
+1. If a 404 or 403 is returned from the installation token exchange, evict the cached mapping.
+2. Re-resolve the installation ID via `GET /repos/{owner}/{repo}/installation`.
+3. If re-resolution fails, mark the pipeline run as failed with a clear error: `"installation not found: app may have been uninstalled from this repository"`.
+4. Log the stale-to-new mapping transition for operational visibility.
 
 ### PAT Fallback
 
@@ -124,18 +133,14 @@ Called inside the River job handler, not in the webhook handler. The webhook onl
 
 ```
 1. GET /repos/{owner}/{repo}/pulls/{number}
-   Accept: application/json (default)
    → PR metadata (title, author, state, head/base SHAs)
-
-2. GET /repos/{owner}/{repo}/pulls/{number}
-   Accept: application/vnd.github.v3.diff
+   Also fetch with Accept: application/vnd.github.v3.diff on the same endpoint
    → Unified diff as plain text
+   (These are the same endpoint with different Accept headers; two HTTP calls, one logical resource.)
 
-3. GET /repos/{owner}/{repo}/pulls/{number}/files?per_page=100
+2. GET /repos/{owner}/{repo}/pulls/{number}/files?per_page=100
    → File list with status (added/modified/removed), paginate if > 100 files
 ```
-
-**Note:** Calls 1 and 2 hit the same endpoint but with different `Accept` headers, yielding different response formats (JSON metadata vs. plain text diff). These are two separate HTTP requests — GitHub does not support returning both in one call.
 
 ### Large Diff Handling
 
@@ -237,6 +242,17 @@ See `specs/12-prompts.md` for the full template. Key sections:
 5. Approximate context disclosure (when `IsApproximate()` is true)
 6. Footer with reaction instructions
 
+### Partial Completion Notification
+
+When the pipeline pauses or halts mid-review (circuit breaker tripped, rate limit exhaustion, context cancellation), post the summary comment immediately with the findings collected so far. The summary comment must include a disclosure banner:
+
+```markdown
+> **Warning: Partial review:** Mimir stopped after reviewing {completed}/{total} tasks.
+> Reason: {reason}. Remaining tasks were not reviewed.
+```
+
+This ensures users are never left wondering whether the review is complete. The banner appears above the findings table in the summary comment. Even if zero findings were collected, the summary comment is posted so the user sees the partial-review notice.
+
 ### Idempotency
 
 Store the summary comment ID in `pull_requests.metadata` JSONB under key `summary_comment_id`. On retry, if the key exists, edit the existing comment instead of posting a new one:
@@ -260,64 +276,28 @@ A periodic River job (`ReactionPollJob`) runs every 15 minutes:
    ```
    GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions
    ```
-3. Write new reactions to `finding_events` via the canonical `CreateFindingEvent` query (Spec 07):
+3. Write new reactions to `finding_events`:
    ```sql
-   INSERT INTO finding_events (finding_id, event_type, actor, old_value, new_value, metadata)
-   VALUES ($1, 'thumbs_up', $2, $3, $4, $5)
-   ON CONFLICT (finding_id, event_type, actor)
-       WHERE event_type IN ('thumbs_up', 'thumbs_down')
-       DO NOTHING;
+   INSERT INTO finding_events (finding_id, event_type, actor, created_at)
+   VALUES ($1, 'thumbs_up', $2, $3)
+   ON CONFLICT DO NOTHING;
    ```
 
 ### Rate Limit Awareness
 
 This job makes one API call per recently-posted finding. For a team generating ~50 findings/day, that's ~50 calls per 15-minute cycle — well within GitHub's rate limits. If `X-RateLimit-Remaining` drops below 100, pause and resume on the next cycle.
 
-### Rate-Limit Partial Review Notification
-
-When the posting loop hits a rate limit and stops early (see Spec 06 posting flow), the summary comment is still posted (or updated) to notify the user that the review was partial:
-
-```markdown
-**Note:** This review was interrupted by a GitHub API rate limit. {posted_count}/{total_count}
-findings were posted inline. The remaining findings will be posted automatically when the
-rate limit resets. Check back shortly.
-```
-
-The summary comment is always the last thing posted. If even the summary comment fails due to rate limiting, the `PostingRetryJob` will post it on its next cycle.
-
 ---
 
-## Addressed-in-Next-Commit Detection
+## Addressed-in-Next-Commit Detection (M2)
 
-Triggered when a `synchronize` event arrives (new push to an open PR).
+**Deferred to M2.** The natural dedup mechanism handles the most common case: when a developer fixes a flagged function and pushes again, the content hash changes. The planner's task-level dedup (Spec 04) sees the content hash mismatch, generates a new task, and the model re-reviews the updated code. If the fix resolves the issue, the model simply won't produce the same finding — the old finding stays in the DB as unaddressed, but no new duplicate is posted.
 
-### Algorithm
+The M2 implementation will add explicit detection:
 
-```
-1. Fetch findings from the previous head SHA for this PR:
-   SELECT * FROM findings
-   WHERE pull_request_id = $1
-     AND addressed_status = 'unaddressed'
-     AND content_hash IS NOT NULL
+1. On `synchronize` events, re-parse flagged files at the new head SHA
+2. Compare content hashes to detect code changes in flagged regions
+3. Transition findings to `likely_addressed` when the underlying code changed
+4. Surface addressed status in the summary comment
 
-2. For each previous finding:
-   a. Check if the file still exists at the new head SHA
-   b. If file exists: re-run tree-sitter parse on the file,
-      extract the AST subtree for the same symbol
-   c. Compute new content_hash = sha256(new AST subtree)
-   d. If old content_hash != new content_hash:
-      UPDATE findings SET addressed_status = 'likely_addressed'
-      WHERE id = $1
-   e. If symbol no longer exists in the file:
-      UPDATE findings SET addressed_status = 'likely_addressed'
-      WHERE id = $1
-
-3. Findings where content_hash IS NULL are skipped (no AST was available).
-   Findings where the file is unchanged are left as 'unaddressed'.
-```
-
-This runs as part of the pipeline job for the new push, before generating new tasks. Cost: one tree-sitter parse per previously-flagged file. No LLM calls.
-
-### Schema Note
-
-The `addressed_status` column is `TEXT NOT NULL DEFAULT 'unaddressed'` with a CHECK constraint on `('unaddressed', 'likely_addressed', 'confirmed')`. Option C (re-inference confirmation) can be added later by implementing the `'confirmed'` transition without schema changes.
+The `addressed_status` column and CHECK constraint are already in the schema (Spec 07) to support this without migration changes when M2 lands.

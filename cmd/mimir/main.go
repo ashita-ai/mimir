@@ -168,7 +168,7 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 						_, err := riverClient.Insert(reqCtx, queue.ReviewJobArgs{
 							RepoFullName: event.RepoFullName,
 							PRNumber:     event.PRNumber,
-							GitHubPRID:   event.GitHubPRID,
+							ExternalPRID:   event.ExternalPRID,
 							HeadSHA:      event.HeadSHA,
 							BaseSHA:      event.BaseSHA,
 							Author:       event.Author,
