@@ -8,17 +8,12 @@ package dbsqlc
 import (
 	"context"
 	"encoding/json"
-	"time"
 
 	"github.com/google/uuid"
 )
 
 const getPullRequest = `-- name: GetPullRequest :one
-SELECT id, external_pr_id, repo_full_name, pr_number,
-       head_sha, base_sha, author, state, metadata,
-       deleted_at, created_at, updated_at
-FROM pull_requests
-WHERE id = $1
+SELECT id, external_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata, deleted_at, created_at, updated_at FROM pull_requests WHERE id = $1 AND deleted_at IS NULL
 `
 
 func (q *Queries) GetPullRequest(ctx context.Context, id uuid.UUID) (PullRequest, error) {
@@ -41,36 +36,52 @@ func (q *Queries) GetPullRequest(ctx context.Context, id uuid.UUID) (PullRequest
 	return i, err
 }
 
-const softDeletePullRequest = `-- name: SoftDeletePullRequest :execrows
-UPDATE pull_requests
-SET deleted_at = now()
-WHERE id = $1 AND deleted_at IS NULL
+const getPullRequestByGitHubID = `-- name: GetPullRequestByGitHubID :one
+SELECT id, external_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata, deleted_at, created_at, updated_at FROM pull_requests
+WHERE external_pr_id = $1 AND deleted_at IS NULL
+ORDER BY created_at DESC
+LIMIT 1
 `
 
-func (q *Queries) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, softDeletePullRequest, id)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) GetPullRequestByGitHubID(ctx context.Context, externalPrID int64) (PullRequest, error) {
+	row := q.db.QueryRow(ctx, getPullRequestByGitHubID, externalPrID)
+	var i PullRequest
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalPrID,
+		&i.RepoFullName,
+		&i.PrNumber,
+		&i.HeadSha,
+		&i.BaseSha,
+		&i.Author,
+		&i.State,
+		&i.Metadata,
+		&i.DeletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const softDeletePullRequest = `-- name: SoftDeletePullRequest :exec
+UPDATE pull_requests SET deleted_at = now(), updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, softDeletePullRequest, id)
+	return err
 }
 
 const upsertPullRequest = `-- name: UpsertPullRequest :one
-INSERT INTO pull_requests (
-    id, external_pr_id, repo_full_name, pr_number,
-    head_sha, base_sha, author, state, metadata
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (external_pr_id, head_sha)
-DO UPDATE SET
-    state      = EXCLUDED.state,
-    metadata   = EXCLUDED.metadata,
-    updated_at = now()
-RETURNING id, created_at, updated_at
+INSERT INTO pull_requests (external_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (external_pr_id, head_sha) DO UPDATE
+SET state = EXCLUDED.state, metadata = EXCLUDED.metadata, updated_at = now()
+RETURNING id, external_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata, deleted_at, created_at, updated_at
 `
 
 type UpsertPullRequestParams struct {
-	ID           uuid.UUID       `json:"id"`
-	ExternalPrID   int64           `json:"external_pr_id"`
+	ExternalPrID int64           `json:"external_pr_id"`
 	RepoFullName string          `json:"repo_full_name"`
 	PrNumber     int32           `json:"pr_number"`
 	HeadSha      string          `json:"head_sha"`
@@ -80,15 +91,8 @@ type UpsertPullRequestParams struct {
 	Metadata     json.RawMessage `json:"metadata"`
 }
 
-type UpsertPullRequestRow struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-func (q *Queries) UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) (UpsertPullRequestRow, error) {
+func (q *Queries) UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) (PullRequest, error) {
 	row := q.db.QueryRow(ctx, upsertPullRequest,
-		arg.ID,
 		arg.ExternalPrID,
 		arg.RepoFullName,
 		arg.PrNumber,
@@ -98,7 +102,20 @@ func (q *Queries) UpsertPullRequest(ctx context.Context, arg UpsertPullRequestPa
 		arg.State,
 		arg.Metadata,
 	)
-	var i UpsertPullRequestRow
-	err := row.Scan(&i.ID, &i.CreatedAt, &i.UpdatedAt)
+	var i PullRequest
+	err := row.Scan(
+		&i.ID,
+		&i.ExternalPrID,
+		&i.RepoFullName,
+		&i.PrNumber,
+		&i.HeadSha,
+		&i.BaseSha,
+		&i.Author,
+		&i.State,
+		&i.Metadata,
+		&i.DeletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
 	return i, err
 }
