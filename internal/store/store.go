@@ -362,23 +362,36 @@ func (s *Store) ListUnpostedFindings(ctx context.Context, pipelineRunID uuid.UUI
 }
 
 func (s *Store) MarkFindingPosted(ctx context.Context, id uuid.UUID, commentID int64) error {
-	if err := s.q.MarkFindingPosted(ctx, dbsqlc.MarkFindingPostedParams{
-		ID:                id,
-		ExternalCommentID: pgtype.Int8{Int64: commentID, Valid: true},
-	}); err != nil {
-		return fmt.Errorf("store: mark finding posted %s: %w", id, err)
-	}
-	return nil
+	return s.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
+		if err := txStore.CreateFindingEvent(ctx, id, "posted", "system", nil, nil); err != nil {
+			return fmt.Errorf("store: mark finding posted %s: event: %w", id, err)
+		}
+		st := txStore.(*Store)
+		if err := st.q.MarkFindingPosted(ctx, dbsqlc.MarkFindingPostedParams{
+			ID:                id,
+			ExternalCommentID: pgtype.Int8{Int64: commentID, Valid: true},
+		}); err != nil {
+			return fmt.Errorf("store: mark finding posted %s: %w", id, err)
+		}
+		return nil
+	})
 }
 
 func (s *Store) MarkFindingAddressed(ctx context.Context, id uuid.UUID, status core.AddressedStatus) error {
-	if err := s.q.MarkFindingAddressed(ctx, dbsqlc.MarkFindingAddressedParams{
-		ID:              id,
-		AddressedStatus: string(status),
-	}); err != nil {
-		return fmt.Errorf("store: mark finding addressed %s: %w", id, err)
-	}
-	return nil
+	newVal := string(status)
+	return s.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
+		if err := txStore.CreateFindingEvent(ctx, id, "addressed", "system", nil, &newVal); err != nil {
+			return fmt.Errorf("store: mark finding addressed %s: event: %w", id, err)
+		}
+		st := txStore.(*Store)
+		if err := st.q.MarkFindingAddressed(ctx, dbsqlc.MarkFindingAddressedParams{
+			ID:              id,
+			AddressedStatus: newVal,
+		}); err != nil {
+			return fmt.Errorf("store: mark finding addressed %s: %w", id, err)
+		}
+		return nil
+	})
 }
 
 // ---------------------------------------------------------------------------
