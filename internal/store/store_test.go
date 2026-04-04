@@ -512,7 +512,7 @@ func TestListUnpostedFindings(t *testing.T) {
 	}))
 
 	// Should appear (not posted, not suppressed, run completed).
-	unposted, err := st.ListUnpostedFindings(ctx)
+	unposted, err := st.ListUnpostedFindings(ctx, run.ID)
 	require.NoError(t, err)
 	assert.Len(t, unposted, 1)
 
@@ -520,7 +520,7 @@ func TestListUnpostedFindings(t *testing.T) {
 	require.NoError(t, st.MarkFindingPosted(ctx, f.ID, 123))
 
 	// Should disappear.
-	unposted, err = st.ListUnpostedFindings(ctx)
+	unposted, err = st.ListUnpostedFindings(ctx, run.ID)
 	require.NoError(t, err)
 	assert.Empty(t, unposted)
 }

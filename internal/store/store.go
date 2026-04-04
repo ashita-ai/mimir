@@ -353,10 +353,10 @@ func (s *Store) ListUnaddressedFindings(ctx context.Context, prID uuid.UUID) ([]
 	return findingsFromRows(rows), nil
 }
 
-func (s *Store) ListUnpostedFindings(ctx context.Context) ([]core.Finding, error) {
-	rows, err := s.q.ListUnpostedFindings(ctx)
+func (s *Store) ListUnpostedFindings(ctx context.Context, pipelineRunID uuid.UUID) ([]core.Finding, error) {
+	rows, err := s.q.ListUnpostedFindings(ctx, pipelineRunID)
 	if err != nil {
-		return nil, fmt.Errorf("store: list unposted findings: %w", err)
+		return nil, fmt.Errorf("store: list unposted findings for run %s: %w", pipelineRunID, err)
 	}
 	return findingsFromRows(rows), nil
 }

@@ -147,7 +147,14 @@ func (q *Queries) FindPriorFinding(ctx context.Context, arg FindPriorFindingPara
 }
 
 const listFindingsForPR = `-- name: ListFindingsForPR :many
-SELECT id, review_task_id, pull_request_id, pipeline_run_id, repo_full_name, file_path, start_line, end_line, symbol, category, confidence_tier, confidence_score, severity, title, body, suggestion, location_hash, content_hash, head_sha, posted_at, external_comment_id, addressed_status, suppression_reason, dismissed_at, dismissed_by, model_id, prompt_tokens, completion_tokens, metadata, created_at, updated_at FROM findings WHERE pull_request_id = $1 ORDER BY severity, confidence_score DESC
+SELECT id, review_task_id, pull_request_id, pipeline_run_id, repo_full_name, file_path, start_line, end_line, symbol, category, confidence_tier, confidence_score, severity, title, body, suggestion, location_hash, content_hash, head_sha, posted_at, external_comment_id, addressed_status, suppression_reason, dismissed_at, dismissed_by, model_id, prompt_tokens, completion_tokens, metadata, created_at, updated_at FROM findings WHERE pull_request_id = $1
+ORDER BY CASE severity
+    WHEN 'critical' THEN 1
+    WHEN 'high'     THEN 2
+    WHEN 'medium'   THEN 3
+    WHEN 'low'      THEN 4
+    WHEN 'info'     THEN 5
+END ASC, confidence_score DESC
 `
 
 func (q *Queries) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID) ([]Finding, error) {
@@ -203,7 +210,14 @@ func (q *Queries) ListFindingsForPR(ctx context.Context, pullRequestID uuid.UUID
 }
 
 const listFindingsForRun = `-- name: ListFindingsForRun :many
-SELECT id, review_task_id, pull_request_id, pipeline_run_id, repo_full_name, file_path, start_line, end_line, symbol, category, confidence_tier, confidence_score, severity, title, body, suggestion, location_hash, content_hash, head_sha, posted_at, external_comment_id, addressed_status, suppression_reason, dismissed_at, dismissed_by, model_id, prompt_tokens, completion_tokens, metadata, created_at, updated_at FROM findings WHERE pipeline_run_id = $1 ORDER BY severity, confidence_score DESC
+SELECT id, review_task_id, pull_request_id, pipeline_run_id, repo_full_name, file_path, start_line, end_line, symbol, category, confidence_tier, confidence_score, severity, title, body, suggestion, location_hash, content_hash, head_sha, posted_at, external_comment_id, addressed_status, suppression_reason, dismissed_at, dismissed_by, model_id, prompt_tokens, completion_tokens, metadata, created_at, updated_at FROM findings WHERE pipeline_run_id = $1
+ORDER BY CASE severity
+    WHEN 'critical' THEN 1
+    WHEN 'high'     THEN 2
+    WHEN 'medium'   THEN 3
+    WHEN 'low'      THEN 4
+    WHEN 'info'     THEN 5
+END ASC, confidence_score DESC
 `
 
 func (q *Queries) ListFindingsForRun(ctx context.Context, pipelineRunID uuid.UUID) ([]Finding, error) {
@@ -320,16 +334,19 @@ func (q *Queries) ListUnaddressedFindingsForPR(ctx context.Context, pullRequestI
 const listUnpostedFindings = `-- name: ListUnpostedFindings :many
 SELECT f.id, f.review_task_id, f.pull_request_id, f.pipeline_run_id, f.repo_full_name, f.file_path, f.start_line, f.end_line, f.symbol, f.category, f.confidence_tier, f.confidence_score, f.severity, f.title, f.body, f.suggestion, f.location_hash, f.content_hash, f.head_sha, f.posted_at, f.external_comment_id, f.addressed_status, f.suppression_reason, f.dismissed_at, f.dismissed_by, f.model_id, f.prompt_tokens, f.completion_tokens, f.metadata, f.created_at, f.updated_at FROM findings f
 JOIN pipeline_runs pr ON pr.id = f.pipeline_run_id
-WHERE f.posted_at IS NULL
+WHERE f.pipeline_run_id = $1
+  AND f.posted_at IS NULL
   AND f.suppression_reason IS NULL
   AND f.external_comment_id IS NULL
   AND pr.status = 'completed'
-  AND f.created_at > now() - interval '7 days'
 ORDER BY f.created_at ASC
 `
 
-func (q *Queries) ListUnpostedFindings(ctx context.Context) ([]Finding, error) {
-	rows, err := q.db.Query(ctx, listUnpostedFindings)
+// Finds findings that were persisted but never posted to GitHub.
+// Used by the PostingRetryJob to recover from GitHub API failures.
+// Scoped by pipeline_run_id per CLAUDE.md boundary rule.
+func (q *Queries) ListUnpostedFindings(ctx context.Context, pipelineRunID uuid.UUID) ([]Finding, error) {
+	rows, err := q.db.Query(ctx, listUnpostedFindings, pipelineRunID)
 	if err != nil {
 		return nil, err
 	}

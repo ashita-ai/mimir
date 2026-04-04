@@ -172,7 +172,7 @@ type StoreAdapter interface {
 	MarkFindingAddressed(ctx context.Context, id uuid.UUID, status core.AddressedStatus) error
 	FindPriorFinding(ctx context.Context, prID uuid.UUID, locationHash string) (*core.Finding, error)
 	ListUnaddressedFindings(ctx context.Context, prID uuid.UUID) ([]core.Finding, error)
-	ListUnpostedFindings(ctx context.Context) ([]core.Finding, error)
+	ListUnpostedFindings(ctx context.Context, pipelineRunID uuid.UUID) ([]core.Finding, error)
 
 	// --- Dismissed Fingerprints ---
 
