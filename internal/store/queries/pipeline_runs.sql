@@ -3,7 +3,7 @@ INSERT INTO pipeline_runs (pull_request_id, head_sha, prompt_version, config_has
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
--- name: CompletePipelineRun :exec
+-- name: CompletePipelineRun :execrows
 UPDATE pipeline_runs
 SET status = $2, tasks_total = $3, tasks_completed = $4, tasks_failed = $5,
     findings_total = $6, findings_posted = $7, findings_suppressed = $8,

@@ -63,13 +63,17 @@ func (q *Queries) GetPullRequestByGitHubID(ctx context.Context, externalPrID int
 	return i, err
 }
 
-const softDeletePullRequest = `-- name: SoftDeletePullRequest :exec
-UPDATE pull_requests SET deleted_at = now(), updated_at = now() WHERE id = $1
+const softDeletePullRequest = `-- name: SoftDeletePullRequest :execrows
+UPDATE pull_requests SET deleted_at = now(), updated_at = now()
+WHERE id = $1 AND deleted_at IS NULL
 `
 
-func (q *Queries) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, softDeletePullRequest, id)
-	return err
+func (q *Queries) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, softDeletePullRequest, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const upsertPullRequest = `-- name: UpsertPullRequest :one

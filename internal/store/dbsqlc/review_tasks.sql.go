@@ -160,7 +160,7 @@ func (q *Queries) ListReviewTasksForRun(ctx context.Context, pipelineRunID uuid.
 	return items, nil
 }
 
-const updateReviewTaskStatus = `-- name: UpdateReviewTaskStatus :exec
+const updateReviewTaskStatus = `-- name: UpdateReviewTaskStatus :execrows
 UPDATE review_tasks
 SET status = $2, error = $3, started_at = CASE WHEN $2 = 'running' THEN now() ELSE started_at END,
     completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END
@@ -173,7 +173,10 @@ type UpdateReviewTaskStatusParams struct {
 	Error  pgtype.Text `json:"error"`
 }
 
-func (q *Queries) UpdateReviewTaskStatus(ctx context.Context, arg UpdateReviewTaskStatusParams) error {
-	_, err := q.db.Exec(ctx, updateReviewTaskStatus, arg.ID, arg.Status, arg.Error)
-	return err
+func (q *Queries) UpdateReviewTaskStatus(ctx context.Context, arg UpdateReviewTaskStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateReviewTaskStatus, arg.ID, arg.Status, arg.Error)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

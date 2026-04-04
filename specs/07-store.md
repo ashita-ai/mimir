@@ -269,8 +269,9 @@ WHERE external_pr_id = $1 AND deleted_at IS NULL
 ORDER BY created_at DESC
 LIMIT 1;
 
--- name: SoftDeletePullRequest :exec
-UPDATE pull_requests SET deleted_at = now(), updated_at = now() WHERE id = $1;
+-- name: SoftDeletePullRequest :execrows
+UPDATE pull_requests SET deleted_at = now(), updated_at = now()
+WHERE id = $1 AND deleted_at IS NULL;
 ```
 
 **pipeline_runs.sql:**
@@ -280,7 +281,7 @@ INSERT INTO pipeline_runs (pull_request_id, head_sha, prompt_version, config_has
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
--- name: CompletePipelineRun :exec
+-- name: CompletePipelineRun :execrows
 UPDATE pipeline_runs
 SET status = $2, tasks_total = $3, tasks_completed = $4, tasks_failed = $5,
     findings_total = $6, findings_posted = $7, findings_suppressed = $8,
@@ -314,7 +315,7 @@ INSERT INTO review_tasks (pull_request_id, pipeline_run_id, task_type, file_path
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
--- name: UpdateReviewTaskStatus :exec
+-- name: UpdateReviewTaskStatus :execrows
 UPDATE review_tasks
 SET status = $2, error = $3, started_at = CASE WHEN $2 = 'running' THEN now() ELSE started_at END,
     completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END
@@ -372,10 +373,10 @@ ORDER BY CASE severity
     WHEN 'info'     THEN 5
 END ASC, confidence_score DESC;
 
--- name: MarkFindingPosted :exec
+-- name: MarkFindingPosted :execrows
 UPDATE findings SET posted_at = now(), external_comment_id = $2, updated_at = now() WHERE id = $1;
 
--- name: MarkFindingAddressed :exec
+-- name: MarkFindingAddressed :execrows
 UPDATE findings SET addressed_status = $2, updated_at = now() WHERE id = $1;
 
 -- name: FindPriorFinding :one

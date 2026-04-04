@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const completePipelineRun = `-- name: CompletePipelineRun :exec
+const completePipelineRun = `-- name: CompletePipelineRun :execrows
 UPDATE pipeline_runs
 SET status = $2, tasks_total = $3, tasks_completed = $4, tasks_failed = $5,
     findings_total = $6, findings_posted = $7, findings_suppressed = $8,
@@ -32,8 +32,8 @@ type CompletePipelineRunParams struct {
 	FindingsSuppressed pgtype.Int4 `json:"findings_suppressed"`
 }
 
-func (q *Queries) CompletePipelineRun(ctx context.Context, arg CompletePipelineRunParams) error {
-	_, err := q.db.Exec(ctx, completePipelineRun,
+func (q *Queries) CompletePipelineRun(ctx context.Context, arg CompletePipelineRunParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completePipelineRun,
 		arg.ID,
 		arg.Status,
 		arg.TasksTotal,
@@ -43,7 +43,10 @@ func (q *Queries) CompletePipelineRun(ctx context.Context, arg CompletePipelineR
 		arg.FindingsPosted,
 		arg.FindingsSuppressed,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const createPipelineRun = `-- name: CreatePipelineRun :one

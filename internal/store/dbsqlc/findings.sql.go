@@ -397,7 +397,7 @@ func (q *Queries) ListUnpostedFindings(ctx context.Context, pipelineRunID uuid.U
 	return items, nil
 }
 
-const markFindingAddressed = `-- name: MarkFindingAddressed :exec
+const markFindingAddressed = `-- name: MarkFindingAddressed :execrows
 UPDATE findings SET addressed_status = $2, updated_at = now() WHERE id = $1
 `
 
@@ -406,12 +406,15 @@ type MarkFindingAddressedParams struct {
 	AddressedStatus string    `json:"addressed_status"`
 }
 
-func (q *Queries) MarkFindingAddressed(ctx context.Context, arg MarkFindingAddressedParams) error {
-	_, err := q.db.Exec(ctx, markFindingAddressed, arg.ID, arg.AddressedStatus)
-	return err
+func (q *Queries) MarkFindingAddressed(ctx context.Context, arg MarkFindingAddressedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markFindingAddressed, arg.ID, arg.AddressedStatus)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const markFindingPosted = `-- name: MarkFindingPosted :exec
+const markFindingPosted = `-- name: MarkFindingPosted :execrows
 UPDATE findings SET posted_at = now(), external_comment_id = $2, updated_at = now() WHERE id = $1
 `
 
@@ -420,7 +423,10 @@ type MarkFindingPostedParams struct {
 	ExternalCommentID pgtype.Int8 `json:"external_comment_id"`
 }
 
-func (q *Queries) MarkFindingPosted(ctx context.Context, arg MarkFindingPostedParams) error {
-	_, err := q.db.Exec(ctx, markFindingPosted, arg.ID, arg.ExternalCommentID)
-	return err
+func (q *Queries) MarkFindingPosted(ctx context.Context, arg MarkFindingPostedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markFindingPosted, arg.ID, arg.ExternalCommentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

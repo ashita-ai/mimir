@@ -3,7 +3,7 @@ INSERT INTO review_tasks (pull_request_id, pipeline_run_id, task_type, file_path
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
 
--- name: UpdateReviewTaskStatus :exec
+-- name: UpdateReviewTaskStatus :execrows
 UPDATE review_tasks
 SET status = $2, error = $3, started_at = CASE WHEN $2 = 'running' THEN now() ELSE started_at END,
     completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END

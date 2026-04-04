@@ -14,5 +14,6 @@ WHERE external_pr_id = $1 AND deleted_at IS NULL
 ORDER BY created_at DESC
 LIMIT 1;
 
--- name: SoftDeletePullRequest :exec
-UPDATE pull_requests SET deleted_at = now(), updated_at = now() WHERE id = $1;
+-- name: SoftDeletePullRequest :execrows
+UPDATE pull_requests SET deleted_at = now(), updated_at = now()
+WHERE id = $1 AND deleted_at IS NULL;

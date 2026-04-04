@@ -116,8 +116,12 @@ func (s *Store) GetPullRequest(ctx context.Context, id uuid.UUID) (*core.PullReq
 }
 
 func (s *Store) SoftDeletePullRequest(ctx context.Context, id uuid.UUID) error {
-	if err := s.q.SoftDeletePullRequest(ctx, id); err != nil {
+	n, err := s.q.SoftDeletePullRequest(ctx, id)
+	if err != nil {
 		return fmt.Errorf("store: soft delete pull request %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: soft delete pull request %s: %w", id, adapter.ErrNotFound)
 	}
 	return nil
 }
@@ -152,7 +156,7 @@ func (s *Store) CreatePipelineRun(ctx context.Context, run *core.PipelineRun) er
 }
 
 func (s *Store) CompletePipelineRun(ctx context.Context, id uuid.UUID, status core.PipelineStatus, stats adapter.PipelineRunStats) error {
-	if err := s.q.CompletePipelineRun(ctx, dbsqlc.CompletePipelineRunParams{
+	n, err := s.q.CompletePipelineRun(ctx, dbsqlc.CompletePipelineRunParams{
 		ID:                 id,
 		Status:             string(status),
 		TasksTotal:         int4FromInt(stats.TasksTotal),
@@ -161,8 +165,12 @@ func (s *Store) CompletePipelineRun(ctx context.Context, id uuid.UUID, status co
 		FindingsTotal:      int4FromInt(stats.FindingsTotal),
 		FindingsPosted:     int4FromInt(stats.FindingsPosted),
 		FindingsSuppressed: int4FromInt(stats.FindingsSuppressed),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("store: complete pipeline run %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: complete pipeline run %s: %w", id, adapter.ErrNotFound)
 	}
 	return nil
 }
@@ -231,12 +239,16 @@ func (s *Store) CreateReviewTask(ctx context.Context, task *core.ReviewTask) err
 }
 
 func (s *Store) UpdateReviewTaskStatus(ctx context.Context, id uuid.UUID, status string, errMsg *string) error {
-	if err := s.q.UpdateReviewTaskStatus(ctx, dbsqlc.UpdateReviewTaskStatusParams{
+	n, err := s.q.UpdateReviewTaskStatus(ctx, dbsqlc.UpdateReviewTaskStatusParams{
 		ID:     id,
 		Status: status,
 		Error:  textFromStringPtr(errMsg),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("store: update review task status %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("store: update review task status %s: %w", id, adapter.ErrNotFound)
 	}
 	return nil
 }
@@ -367,11 +379,15 @@ func (s *Store) MarkFindingPosted(ctx context.Context, id uuid.UUID, commentID i
 			return fmt.Errorf("store: mark finding posted %s: event: %w", id, err)
 		}
 		st := txStore.(*Store)
-		if err := st.q.MarkFindingPosted(ctx, dbsqlc.MarkFindingPostedParams{
+		n, err := st.q.MarkFindingPosted(ctx, dbsqlc.MarkFindingPostedParams{
 			ID:                id,
 			ExternalCommentID: pgtype.Int8{Int64: commentID, Valid: true},
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("store: mark finding posted %s: %w", id, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("store: mark finding posted %s: %w", id, adapter.ErrNotFound)
 		}
 		return nil
 	})
@@ -384,11 +400,15 @@ func (s *Store) MarkFindingAddressed(ctx context.Context, id uuid.UUID, status c
 			return fmt.Errorf("store: mark finding addressed %s: event: %w", id, err)
 		}
 		st := txStore.(*Store)
-		if err := st.q.MarkFindingAddressed(ctx, dbsqlc.MarkFindingAddressedParams{
+		n, err := st.q.MarkFindingAddressed(ctx, dbsqlc.MarkFindingAddressedParams{
 			ID:              id,
 			AddressedStatus: newVal,
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("store: mark finding addressed %s: %w", id, err)
+		}
+		if n == 0 {
+			return fmt.Errorf("store: mark finding addressed %s: %w", id, adapter.ErrNotFound)
 		}
 		return nil
 	})

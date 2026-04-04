@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/ashita-ai/mimir/internal/core"
 )
+
+// ErrNotFound is returned when a mutating operation targets a row that does
+// not exist (or, for soft-deletable entities, has already been deleted).
+var ErrNotFound = errors.New("not found")
 
 // ---------------------------------------------------------------------------
 // ProviderAdapter — code hosting platform (GitHub M1, GitLab M2+)
