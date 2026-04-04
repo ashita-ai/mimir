@@ -154,29 +154,31 @@ Use --workers=0 to run HTTP only (no workers, useful behind a load balancer).`,
 				r.Use(middleware.RealIP)
 				r.Use(middleware.Recoverer)
 
-				r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-					if err := pool.Ping(r.Context()); err != nil {
-						http.Error(w, "db unreachable", http.StatusServiceUnavailable)
-						return
-					}
-					w.WriteHeader(http.StatusOK)
-					fmt.Fprint(w, "ok")
-				})
+				r.Route("/v1", func(r chi.Router) {
+					r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+						if err := pool.Ping(r.Context()); err != nil {
+							http.Error(w, "db unreachable", http.StatusServiceUnavailable)
+							return
+						}
+						w.WriteHeader(http.StatusOK)
+						fmt.Fprint(w, "ok")
+					})
 
-				r.Mount("/webhooks/github", &ingest.WebhookHandler{
-					OnPREvent: func(reqCtx context.Context, event ingest.PREvent) error {
-						_, err := riverClient.Insert(reqCtx, queue.ReviewJobArgs{
-							RepoFullName: event.RepoFullName,
-							PRNumber:     event.PRNumber,
-							ExternalPRID:   event.ExternalPRID,
-							HeadSHA:      event.HeadSHA,
-							BaseSHA:      event.BaseSHA,
-							Author:       event.Author,
-						}, nil)
-						return err
-					},
-					Secret: []byte(webhookSecret),
-					Logger: log.Named("webhook"),
+					r.Mount("/webhooks/github", &ingest.WebhookHandler{
+						OnPREvent: func(reqCtx context.Context, event ingest.PREvent) error {
+							_, err := riverClient.Insert(reqCtx, queue.ReviewJobArgs{
+								RepoFullName: event.RepoFullName,
+								PRNumber:     event.PRNumber,
+								ExternalPRID:   event.ExternalPRID,
+								HeadSHA:      event.HeadSHA,
+								BaseSHA:      event.BaseSHA,
+								Author:       event.Author,
+							}, nil)
+							return err
+						},
+						Secret: []byte(webhookSecret),
+						Logger: log.Named("webhook"),
+					})
 				})
 
 				srv = &http.Server{

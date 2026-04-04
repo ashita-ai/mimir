@@ -78,7 +78,7 @@ if cfg.GitHubAppID != 0 && cfg.GitHubAppPrivateKeyPath != "" {
 
 ### Endpoint
 
-`POST /webhooks/github`
+`POST /v1/webhooks/github`
 
 ### Event Filter
 

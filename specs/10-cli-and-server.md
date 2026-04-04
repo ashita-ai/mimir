@@ -68,8 +68,10 @@ func runServe(cfg Config) error {
         r.Use(middleware.Recoverer)
         r.Use(middleware.Timeout(30 * time.Second))
 
-        r.Get("/healthz", healthHandler(pool, riverClient))
-        r.Post("/webhooks/github", webhookHandler(cfg.GitHub.WebhookSecret, store, riverClient))
+        r.Route("/v1", func(r chi.Router) {
+            r.Get("/healthz", healthHandler(pool, riverClient))
+            r.Post("/webhooks/github", webhookHandler(cfg.GitHub.WebhookSecret, store, riverClient))
+        })
 
         srv := &http.Server{Addr: cfg.ListenAddr, Handler: r}
         go srv.ListenAndServe()
@@ -230,7 +232,7 @@ Optional:
 
 ## Health Check
 
-`GET /healthz` — returns 200 if the system is operational.
+`GET /v1/healthz` — returns 200 if the system is operational.
 
 ```json
 {
