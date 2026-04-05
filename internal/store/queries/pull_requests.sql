@@ -2,7 +2,7 @@
 INSERT INTO pull_requests (external_pr_id, repo_full_name, pr_number, head_sha, base_sha, author, state, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (external_pr_id, head_sha) DO UPDATE
-SET state = EXCLUDED.state, metadata = EXCLUDED.metadata, updated_at = now()
+SET state = EXCLUDED.state, metadata = EXCLUDED.metadata, deleted_at = NULL, updated_at = now()
 RETURNING *;
 
 -- name: GetPullRequest :one

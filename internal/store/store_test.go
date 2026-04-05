@@ -161,6 +161,29 @@ func TestSoftDeletePullRequest(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestUpsertPullRequest_ClearsDeletedAt(t *testing.T) {
+	_, st := setupTestDB(t)
+	ctx := context.Background()
+
+	pr := insertTestPR(t, st)
+
+	// Soft-delete the PR.
+	err := st.SoftDeletePullRequest(ctx, pr.ID)
+	require.NoError(t, err)
+
+	_, err = st.GetPullRequest(ctx, pr.ID)
+	require.Error(t, err, "should be invisible after soft delete")
+
+	// Upsert with the same (external_pr_id, head_sha) should clear deleted_at.
+	pr.State = core.PRStateOpen
+	err = st.UpsertPullRequest(ctx, pr)
+	require.NoError(t, err)
+
+	got, err := st.GetPullRequest(ctx, pr.ID)
+	require.NoError(t, err, "should be visible again after upsert clears deleted_at")
+	assert.Equal(t, core.PRStateOpen, got.State)
+}
+
 // ---------------------------------------------------------------------------
 // PipelineRun tests
 // ---------------------------------------------------------------------------
@@ -381,6 +404,13 @@ func TestCreateAndListFindings(t *testing.T) {
 	assert.Equal(t, 42, *findings[0].StartLine)
 	assert.Equal(t, run.ID, findings[0].PipelineRunID)
 	assert.Equal(t, pr.HeadSHA, findings[0].HeadSHA)
+
+	// CreateFinding must record a 'created' event in finding_events.
+	events, err := st.ListEventsForFinding(ctx, f.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1, "CreateFinding should record exactly one 'created' event")
+	assert.Equal(t, "created", events[0].EventType)
+	assert.Equal(t, "system", events[0].Actor)
 }
 
 func TestMarkFindingPosted(t *testing.T) {
@@ -459,8 +489,29 @@ func TestFindPriorFinding(t *testing.T) {
 	require.NotNil(t, prior)
 	assert.Equal(t, f.ID, prior.ID)
 
-	// Different PR — should not find.
-	prior, err = st.FindPriorFinding(ctx, uuid.New(), hash)
+	// A second PR row for the same logical PR (same external_pr_id, different
+	// head_sha — simulates a force-push) should still find the prior finding.
+	pr2 := &core.PullRequest{
+		ExternalPRID: pr.ExternalPRID, // same logical PR
+		RepoFullName: pr.RepoFullName,
+		PRNumber:     pr.PRNumber,
+		HeadSHA:      "forcepush1",
+		BaseSHA:      pr.BaseSHA,
+		Author:       pr.Author,
+		State:        core.PRStateOpen,
+		Metadata:     json.RawMessage("{}"),
+	}
+	require.NoError(t, st.UpsertPullRequest(ctx, pr2))
+	require.NotEqual(t, pr.ID, pr2.ID, "force-push should create a new PR row")
+
+	prior, err = st.FindPriorFinding(ctx, pr2.ID, hash)
+	require.NoError(t, err)
+	require.NotNil(t, prior, "should find finding across force-push via external_pr_id")
+	assert.Equal(t, f.ID, prior.ID)
+
+	// Completely different logical PR — should not find.
+	otherPR := insertTestPR(t, st)
+	prior, err = st.FindPriorFinding(ctx, otherPR.ID, hash)
 	require.NoError(t, err)
 	assert.Nil(t, prior)
 }

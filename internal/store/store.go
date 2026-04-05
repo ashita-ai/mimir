@@ -25,6 +25,7 @@ import (
 type Store struct {
 	pool *pgxpool.Pool
 	q    *dbsqlc.Queries
+	tx   pgx.Tx // non-nil when this Store is transaction-bound
 }
 
 // New creates a Store backed by the given connection pool.
@@ -45,7 +46,15 @@ func (s *Store) Pool() *pgxpool.Pool {
 // ---------------------------------------------------------------------------
 
 func (s *Store) WithTx(ctx context.Context, fn adapter.TxFunc) error {
-	tx, err := s.pool.Begin(ctx)
+	// If already transaction-bound, use a savepoint (pgx creates one
+	// automatically when you call Begin on an existing Tx).
+	var tx pgx.Tx
+	var err error
+	if s.tx != nil {
+		tx, err = s.tx.Begin(ctx)
+	} else {
+		tx, err = s.pool.Begin(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
@@ -54,6 +63,7 @@ func (s *Store) WithTx(ctx context.Context, fn adapter.TxFunc) error {
 	txStore := &Store{
 		pool: s.pool,
 		q:    s.q.WithTx(tx),
+		tx:   tx,
 	}
 
 	if err := fn(txStore, tx); err != nil {
@@ -287,39 +297,46 @@ func (s *Store) CreateFinding(ctx context.Context, f *core.Finding) error {
 		metadata = json.RawMessage("{}")
 	}
 
-	row, err := s.q.CreateFinding(ctx, dbsqlc.CreateFindingParams{
-		ReviewTaskID:      f.ReviewTaskID,
-		PullRequestID:     f.PullRequestID,
-		PipelineRunID:     f.PipelineRunID,
-		RepoFullName:      f.RepoFullName,
-		FilePath:          f.FilePath,
-		StartLine:         int4FromIntPtr(f.StartLine),
-		EndLine:           int4FromIntPtr(f.EndLine),
-		Symbol:            f.Symbol,
-		Category:          string(f.Category),
-		ConfidenceTier:    string(f.ConfidenceTier),
-		ConfidenceScore:   f.ConfidenceScore,
-		Severity:          string(f.Severity),
-		Title:             f.Title,
-		Body:              f.Body,
-		Suggestion:        textFromString(f.Suggestion),
-		LocationHash:      f.LocationHash,
-		ContentHash:       textFromStringPtr(f.ContentHash),
-		HeadSha:           f.HeadSHA,
-		SuppressionReason: textFromStringPtr(f.SuppressionReason),
-		ModelID:           f.ModelID,
-		PromptTokens:      int4FromIntPtr(f.PromptTokens),
-		CompletionTokens:  int4FromIntPtr(f.CompletionTokens),
-		Metadata:          metadata,
-	})
-	if err != nil {
-		return fmt.Errorf("store: create finding: %w", err)
-	}
+	return s.WithTx(ctx, func(txStore adapter.StoreAdapter, _ pgx.Tx) error {
+		st := txStore.(*Store)
+		row, err := st.q.CreateFinding(ctx, dbsqlc.CreateFindingParams{
+			ReviewTaskID:      f.ReviewTaskID,
+			PullRequestID:     f.PullRequestID,
+			PipelineRunID:     f.PipelineRunID,
+			RepoFullName:      f.RepoFullName,
+			FilePath:          f.FilePath,
+			StartLine:         int4FromIntPtr(f.StartLine),
+			EndLine:           int4FromIntPtr(f.EndLine),
+			Symbol:            f.Symbol,
+			Category:          string(f.Category),
+			ConfidenceTier:    string(f.ConfidenceTier),
+			ConfidenceScore:   f.ConfidenceScore,
+			Severity:          string(f.Severity),
+			Title:             f.Title,
+			Body:              f.Body,
+			Suggestion:        textFromString(f.Suggestion),
+			LocationHash:      f.LocationHash,
+			ContentHash:       textFromStringPtr(f.ContentHash),
+			HeadSha:           f.HeadSHA,
+			SuppressionReason: textFromStringPtr(f.SuppressionReason),
+			ModelID:           f.ModelID,
+			PromptTokens:      int4FromIntPtr(f.PromptTokens),
+			CompletionTokens:  int4FromIntPtr(f.CompletionTokens),
+			Metadata:          metadata,
+		})
+		if err != nil {
+			return fmt.Errorf("store: create finding: %w", err)
+		}
 
-	f.ID = row.ID
-	f.CreatedAt = row.CreatedAt
-	f.UpdatedAt = row.UpdatedAt
-	return nil
+		f.ID = row.ID
+		f.CreatedAt = row.CreatedAt
+		f.UpdatedAt = row.UpdatedAt
+
+		if err := txStore.CreateFindingEvent(ctx, f.ID, "created", "system", nil, nil); err != nil {
+			return fmt.Errorf("store: create finding %s: event: %w", f.ID, err)
+		}
+		return nil
+	})
 }
 
 func (s *Store) ListFindingsForPR(ctx context.Context, prID uuid.UUID) ([]core.Finding, error) {
@@ -340,8 +357,8 @@ func (s *Store) ListFindingsForRun(ctx context.Context, runID uuid.UUID) ([]core
 
 func (s *Store) FindPriorFinding(ctx context.Context, prID uuid.UUID, locationHash string) (*core.Finding, error) {
 	row, err := s.q.FindPriorFinding(ctx, dbsqlc.FindPriorFindingParams{
-		PullRequestID: prID,
-		LocationHash:  locationHash,
+		ID:           prID,
+		LocationHash: locationHash,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

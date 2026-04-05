@@ -380,14 +380,19 @@ UPDATE findings SET posted_at = now(), external_comment_id = $2, updated_at = no
 UPDATE findings SET addressed_status = $2, updated_at = now() WHERE id = $1;
 
 -- name: FindPriorFinding :one
--- Look across all runs for this PR, not just the current one.
+-- Look across all rows for this logical PR (same external_pr_id), not just one
+-- pull_request_id. A force-push creates a new pull_requests row with a different
+-- UUID but the same external_pr_id, and we must still find prior findings.
 -- NOTE: This intentionally does NOT filter on pull_requests.deleted_at.
 -- Soft-deleted PRs' findings are still valid for dedup — suppressing a duplicate
 -- against a soft-deleted PR's finding is correct behavior. The finding existed,
 -- the code was reviewed, and re-flagging it adds noise without value.
-SELECT id, location_hash, content_hash, head_sha FROM findings
-WHERE pull_request_id = $1 AND location_hash = $2 AND addressed_status = 'unaddressed'
-ORDER BY created_at DESC
+SELECT f.id, f.location_hash, f.content_hash, f.head_sha FROM findings f
+JOIN pull_requests pr ON pr.id = f.pull_request_id
+WHERE pr.external_pr_id = (SELECT p.external_pr_id FROM pull_requests p WHERE p.id = $1)
+  AND f.location_hash = $2
+  AND f.addressed_status = 'unaddressed'
+ORDER BY f.created_at DESC
 LIMIT 1;
 
 -- name: ListUnaddressedFindingsForPR :many
